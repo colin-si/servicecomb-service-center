@@ -19,9 +19,11 @@ package resource
 
 import (
 	roa "github.com/apache/servicecomb-service-center/pkg/rest"
-	v1 "github.com/apache/servicecomb-service-center/server/resource/v1"
-	v4 "github.com/apache/servicecomb-service-center/server/resource/v4"
-	"github.com/apache/servicecomb-service-center/server/service/rbac"
+	"github.com/apache/servicecomb-service-center/server/resource/disco"
+	"github.com/apache/servicecomb-service-center/server/resource/gov"
+	"github.com/apache/servicecomb-service-center/server/resource/govern"
+	"github.com/apache/servicecomb-service-center/server/resource/rbac"
+	rbacsvc "github.com/apache/servicecomb-service-center/server/service/rbac"
 )
 
 func init() {
@@ -29,9 +31,13 @@ func init() {
 }
 
 func initRouter() {
-	if rbac.Enabled() {
-		roa.RegisterServant(&v4.AuthResource{})
-		roa.RegisterServant(&v4.RoleResource{})
+	if rbacsvc.Enabled() {
+		roa.RegisterServant(&rbac.AuthResource{})
+		roa.RegisterServant(&rbac.RoleResource{})
 	}
-	roa.RegisterServant(&v1.Governance{})
+	roa.RegisterServant(&disco.ServiceResource{})
+	roa.RegisterServant(&disco.SchemaResource{})
+	roa.RegisterServant(&disco.InstanceResource{})
+	roa.RegisterServant(&gov.Governance{})
+	roa.RegisterServant(&govern.Resource{})
 }

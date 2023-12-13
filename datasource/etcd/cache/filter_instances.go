@@ -21,21 +21,20 @@ import (
 	"context"
 	"fmt"
 
-	pb "github.com/go-chassis/cari/discovery"
-
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/util"
 	"github.com/apache/servicecomb-service-center/pkg/cache"
 	"github.com/apache/servicecomb-service-center/pkg/log"
+	pb "github.com/go-chassis/cari/discovery"
+	"github.com/little-cui/etcdadpt"
 )
 
 type InstancesFilter struct {
 }
 
 func (f *InstancesFilter) Name(ctx context.Context, _ *cache.Node) string {
-	instanceKey, ok := ctx.Value(CtxFindProviderInstance).(*pb.HeartbeatSetElement)
+	instanceKey, ok := ctx.Value(CtxProviderInstanceKey).(*pb.HeartbeatSetElement)
 	if ok {
 		return instanceKey.ServiceId + path.SPLIT + instanceKey.InstanceId
 	}
@@ -43,7 +42,7 @@ func (f *InstancesFilter) Name(ctx context.Context, _ *cache.Node) string {
 }
 
 func (f *InstancesFilter) Init(ctx context.Context, parent *cache.Node) (node *cache.Node, err error) {
-	pCopy := *parent.Cache.Get(Find).(*VersionRuleCacheItem)
+	pCopy := *parent.Cache.Get(FindResult).(*VersionRuleCacheItem)
 
 	pCopy.Instances, pCopy.Rev, err = f.Find(ctx, parent)
 	if err != nil {
@@ -52,16 +51,16 @@ func (f *InstancesFilter) Init(ctx context.Context, parent *cache.Node) (node *c
 
 	pCopy.InitBrokenQueue()
 	node = cache.NewNode()
-	node.Cache.Set(Find, &pCopy)
+	node.Cache.Set(FindResult, &pCopy)
 	return
 }
 
 func (f *InstancesFilter) Find(ctx context.Context, parent *cache.Node) (
 	instances []*pb.MicroServiceInstance, rev string, err error) {
-	pCache := parent.Cache.Get(Find).(*VersionRuleCacheItem)
-	provider := ctx.Value(CtxFindProvider).(*pb.MicroServiceKey)
+	pCache := parent.Cache.Get(FindResult).(*VersionRuleCacheItem)
+	provider := ctx.Value(CtxProviderKey).(*pb.MicroServiceKey)
 
-	instanceKey, ok := ctx.Value(CtxFindProviderInstance).(*pb.HeartbeatSetElement)
+	instanceKey, ok := ctx.Value(CtxProviderInstanceKey).(*pb.HeartbeatSetElement)
 	if ok {
 		if len(pCache.ServiceIds) == 0 {
 			// can not find by instanceKey.ServiceID after pre-filters init
@@ -72,18 +71,18 @@ func (f *InstancesFilter) Find(ctx context.Context, parent *cache.Node) (
 		instances, rev, err = f.BatchFindInstances(ctx, provider.Tenant, pCache.ServiceIds)
 	}
 	if err != nil {
-		consumer := ctx.Value(CtxFindConsumer).(*pb.MicroService)
-		findFlag := fmt.Sprintf("consumer '%s' find provider %s/%s/%s", consumer.ServiceId,
-			provider.AppId, provider.ServiceName, provider.Version)
-		log.Errorf(err, "Find failed, %s", findFlag)
+		consumer := ctx.Value(CtxConsumerID).(*pb.MicroService)
+		findFlag := fmt.Sprintf("consumer '%s' find provider %s/%s", consumer.ServiceId,
+			provider.AppId, provider.ServiceName)
+		log.Error(fmt.Sprintf("Find failed, %s", findFlag), err)
 	}
 	return
 }
 
 func (f *InstancesFilter) findInstances(ctx context.Context, domainProject, serviceID, instanceID string, maxRevs []int64, counts []int64) (instances []*pb.MicroServiceInstance, err error) {
 	key := path.GenerateInstanceKey(domainProject, serviceID, instanceID)
-	opts := append(util.FromContext(ctx), client.WithStrKey(key), client.WithPrefix())
-	resp, err := kv.Store().Instance().Search(ctx, opts...)
+	opts := append(util.FromContext(ctx), etcdadpt.WithStrKey(key), etcdadpt.WithPrefix())
+	resp, err := sd.Instance().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +104,9 @@ func (f *InstancesFilter) findInstances(ctx context.Context, domainProject, serv
 
 func (f *InstancesFilter) FindInstances(ctx context.Context, domainProject string, instanceKey *pb.HeartbeatSetElement) (instances []*pb.MicroServiceInstance, rev string, err error) {
 	var (
-		maxRevs = make([]int64, len(getOrCreateClustersIndex()))
-		counts  = make([]int64, len(getOrCreateClustersIndex()))
+		index   = getOrCreateClustersIndex()
+		maxRevs = make([]int64, len(index))
+		counts  = make([]int64, len(index))
 	)
 	instances, err = f.findInstances(ctx, domainProject, instanceKey.ServiceId, instanceKey.InstanceId, maxRevs, counts)
 	if err != nil {
@@ -117,8 +117,9 @@ func (f *InstancesFilter) FindInstances(ctx context.Context, domainProject strin
 
 func (f *InstancesFilter) BatchFindInstances(ctx context.Context, domainProject string, serviceIDs []string) (instances []*pb.MicroServiceInstance, rev string, err error) {
 	var (
-		maxRevs = make([]int64, len(getOrCreateClustersIndex()))
-		counts  = make([]int64, len(getOrCreateClustersIndex()))
+		index   = getOrCreateClustersIndex()
+		maxRevs = make([]int64, len(index))
+		counts  = make([]int64, len(index))
 	)
 	for _, providerServiceID := range serviceIDs {
 		insts, err := f.findInstances(ctx, domainProject, providerServiceID, "", maxRevs, counts)

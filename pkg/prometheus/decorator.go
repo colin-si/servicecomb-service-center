@@ -18,9 +18,14 @@
 package prometheus
 
 import (
+	"fmt"
+	"net/http"
+
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/go-chassis/go-chassis/v2/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -29,10 +34,10 @@ var Vectors = make(map[string]prometheus.Collector)
 
 func registerMetrics(name string, vec prometheus.Collector) {
 	if _, ok := Vectors[name]; ok {
-		log.Warnf("found duplicate metrics name[%s], override!", name)
+		log.Warn(fmt.Sprintf("found duplicate metrics name[%s], override!", name))
 	}
-	if err := prometheus.Register(vec); err != nil {
-		log.Fatalf(err, "register prometheus metrics[%s] failed", name)
+	if err := metrics.GetSystemPrometheusRegistry().Register(vec); err != nil {
+		log.Fatal(fmt.Sprintf("register prometheus metrics[%s] failed", name), err)
 	}
 	Vectors[name] = vec
 }
@@ -59,5 +64,9 @@ func NewSummaryVec(opts prometheus.SummaryOpts, labelNames []string) *prometheus
 }
 
 func Gather() ([]*dto.MetricFamily, error) {
-	return prometheus.DefaultGatherer.Gather()
+	return metrics.GetSystemPrometheusRegistry().Gather()
+}
+
+func HTTPHandler() http.Handler {
+	return promhttp.HandlerFor(metrics.GetSystemPrometheusRegistry(), promhttp.HandlerOpts{})
 }

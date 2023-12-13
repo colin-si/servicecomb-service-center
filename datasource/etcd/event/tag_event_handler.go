@@ -26,9 +26,9 @@ import (
 
 	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/cache"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	serviceUtil "github.com/apache/servicecomb-service-center/datasource/etcd/util"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/task"
@@ -37,7 +37,7 @@ import (
 )
 
 type TagsChangedTask struct {
-	sd.KvEvent
+	kvstore.Event
 
 	key string
 	err error
@@ -77,8 +77,8 @@ func (apt *TagsChangedTask) publish(ctx context.Context, domainProject, consumer
 
 	providerIDs, err := serviceUtil.GetProviderIds(ctx, domainProject, consumer)
 	if err != nil {
-		log.Errorf(err, "get service[%s][%s/%s/%s/%s]'s providerIDs failed",
-			consumerID, consumer.Environment, consumer.AppId, consumer.ServiceName, consumer.Version)
+		log.Error(fmt.Sprintf("get service[%s][%s/%s/%s/%s]'s providerIDs failed",
+			consumerID, consumer.Environment, consumer.AppId, consumer.ServiceName, consumer.Version), err)
 		return err
 	}
 
@@ -91,7 +91,7 @@ func (apt *TagsChangedTask) publish(ctx context.Context, domainProject, consumer
 		}
 
 		providerKey := pb.MicroServiceToKey(domainProject, provider)
-		PublishInstanceEvent(apt.KvEvent, domainProject, providerKey, []string{consumerID})
+		PublishInstanceEvent(apt.Event, providerKey, []string{consumerID})
 	}
 	return nil
 }
@@ -102,11 +102,11 @@ func (apt *TagsChangedTask) publish(ctx context.Context, domainProject, consumer
 type TagEventHandler struct {
 }
 
-func (h *TagEventHandler) Type() sd.Type {
-	return kv.ServiceTag
+func (h *TagEventHandler) Type() kvstore.Type {
+	return sd.TypeServiceTag
 }
 
-func (h *TagEventHandler) OnEvent(evt sd.KvEvent) {
+func (h *TagEventHandler) OnEvent(evt kvstore.Event) {
 	action := evt.Type
 	if action == pb.EVT_INIT {
 		return
@@ -115,11 +115,11 @@ func (h *TagEventHandler) OnEvent(evt sd.KvEvent) {
 	consumerID, domainProject := path.GetInfoFromTagKV(evt.KV.Key)
 
 	if event.Center().Closed() {
-		log.Warnf("caught [%s] service tags[%s/%s] event, but notify service is closed",
-			action, consumerID, evt.KV.Value)
+		log.Warn(fmt.Sprintf("caught [%s] service tags[%s/%s] event, but notify service is closed",
+			action, consumerID, evt.KV.Value))
 		return
 	}
-	log.Infof("caught [%s] service tags[%s/%s] event", action, consumerID, evt.KV.Value)
+	log.Info(fmt.Sprintf("caught [%s] service tags[%s/%s] event", action, consumerID, evt.KV.Value))
 
 	err := task.GetService().Add(context.Background(),
 		NewTagsChangedAsyncTask(domainProject, consumerID, evt))
@@ -132,10 +132,10 @@ func NewTagEventHandler() *TagEventHandler {
 	return &TagEventHandler{}
 }
 
-func NewTagsChangedAsyncTask(domainProject, consumerID string, evt sd.KvEvent) *TagsChangedTask {
+func NewTagsChangedAsyncTask(domainProject, consumerID string, evt kvstore.Event) *TagsChangedTask {
 	evt.Type = pb.EVT_EXPIRE
 	return &TagsChangedTask{
-		KvEvent:       evt,
+		Event:         evt,
 		key:           "TagsChangedAsyncTask_" + consumerID,
 		DomainProject: domainProject,
 		ConsumerID:    consumerID,

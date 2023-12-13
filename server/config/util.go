@@ -21,9 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/astaxie/beego"
+	beego "github.com/beego/beego/v2/server/web"
 	"github.com/go-chassis/go-archaius"
 	"github.com/iancoleman/strcase"
+	"github.com/spf13/cast"
 )
 
 func newOptions(key string, opts []Option) *Options {
@@ -87,6 +88,36 @@ func GetInt64(key string, def int64, opts ...Option) int64 {
 		return archaius.GetInt64(key, def)
 	}
 	return beego.AppConfig.DefaultInt64(options.Standby, def)
+}
+
+func GetStringMap(key string) map[string]string {
+	result := make(map[string]string)
+	getMapFunc(key, func(k string, value interface{}) {
+		result[k] = cast.ToString(value)
+	})
+	return result
+}
+
+func getMapFunc(key string, dataFunc func(k string, v interface{})) {
+	configs := archaius.GetConfigs()
+	keyPoint := key + "."
+	for k, v := range configs {
+		if !strings.HasPrefix(k, keyPoint) {
+			continue
+		}
+
+		keys := strings.Split(k, keyPoint)
+		keysLen := len(keys)
+		if keysLen != 2 {
+			continue
+		}
+
+		kk := keys[keysLen-1]
+		if strings.Contains(kk, ".") {
+			continue
+		}
+		dataFunc(kk, v)
+	}
 }
 
 // GetDuration return the time.Duration type value by specified key

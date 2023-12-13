@@ -21,42 +21,47 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/go-chassis/cari/discovery"
-
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/foundation/stringutil"
 )
 
-func ToResponse(key []byte) (keys []string) {
+func splitKey(key []byte) (keys []string) {
 	return strings.Split(util.BytesToStringWithNoCopy(key), SPLIT)
 }
 
-func GetInfoFromSvcKV(key []byte) (serviceID, domainProject string) {
-	keys := ToResponse(key)
+func getLast2Keys(key []byte) (string, string) {
+	keys := splitKey(key)
+	l := len(keys)
+	if l < 3 {
+		return "", ""
+	}
+	return fmt.Sprintf("%s/%s", keys[l-3], keys[l-2]), keys[l-1]
+}
+
+func getLast3Keys(key []byte) (string, string, string) {
+	keys := splitKey(key)
 	l := len(keys)
 	if l < 4 {
-		return
+		return "", "", ""
 	}
-	serviceID = keys[l-1]
-	domainProject = fmt.Sprintf("%s/%s", keys[l-3], keys[l-2])
+	return fmt.Sprintf("%s/%s", keys[l-4], keys[l-3]), keys[l-2], keys[l-1]
+}
+
+func GetInfoFromSvcKV(key []byte) (serviceID, domainProject string) {
+	domainProject, serviceID = getLast2Keys(key)
 	return
 }
 
 func GetInfoFromInstKV(key []byte) (serviceID, instanceID, domainProject string) {
-	keys := ToResponse(key)
-	l := len(keys)
-	if l < 4 {
-		return
-	}
-	serviceID = keys[l-2]
-	instanceID = keys[l-1]
-	domainProject = fmt.Sprintf("%s/%s", keys[l-4], keys[l-3])
+	domainProject, serviceID, instanceID = getLast3Keys(key)
 	return
 }
 
 func GetInfoFromDomainKV(key []byte) (domain string) {
-	keys := ToResponse(key)
+	keys := splitKey(key)
 	l := len(keys)
-	if l < 2 {
+	if l < 1 {
 		return
 	}
 	domain = keys[l-1]
@@ -64,39 +69,21 @@ func GetInfoFromDomainKV(key []byte) (domain string) {
 }
 
 func GetInfoFromProjectKV(key []byte) (domain, project string) {
-	keys := ToResponse(key)
+	keys := splitKey(key)
 	l := len(keys)
 	if l < 2 {
-		return
+		return "", ""
 	}
 	return keys[l-2], keys[l-1]
 }
 
-func GetInfoFromRuleKV(key []byte) (serviceID, ruleID, domainProject string) {
-	keys := ToResponse(key)
-	l := len(keys)
-	if l < 4 {
-		return
-	}
-	serviceID = keys[l-2]
-	ruleID = keys[l-1]
-	domainProject = fmt.Sprintf("%s/%s", keys[l-4], keys[l-3])
-	return
-}
-
 func GetInfoFromTagKV(key []byte) (serviceID, domainProject string) {
-	keys := ToResponse(key)
-	l := len(keys)
-	if l < 3 {
-		return
-	}
-	serviceID = keys[l-1]
-	domainProject = fmt.Sprintf("%s/%s", keys[l-3], keys[l-2])
+	domainProject, serviceID = getLast2Keys(key)
 	return
 }
 
 func GetInfoFromSvcIndexKV(key []byte) *discovery.MicroServiceKey {
-	keys := ToResponse(key)
+	keys := splitKey(key)
 	l := len(keys)
 	if l < 6 {
 		return nil
@@ -115,40 +102,29 @@ func GetInfoFromSvcAliasKV(key []byte) *discovery.MicroServiceKey {
 	return GetInfoFromSvcIndexKV(key)
 }
 
+func GetInfoFromSchemaRefKV(key []byte) (domainProject, serviceID, schemaID string) {
+	return getLast3Keys(key)
+}
+
 func GetInfoFromSchemaSummaryKV(key []byte) (domainProject, serviceID, schemaID string) {
-	keys := ToResponse(key)
-	l := len(keys)
-	if l < 4 {
-		return
-	}
-	domainProject = fmt.Sprintf("%s/%s", keys[l-4], keys[l-3])
-	return domainProject, keys[l-2], keys[l-1]
+	return getLast3Keys(key)
 }
 
 func GetInfoFromSchemaKV(key []byte) (domainProject, serviceID, schemaID string) {
-	keys := ToResponse(key)
-	l := len(keys)
-	if l < 4 {
-		return
-	}
-	domainProject = fmt.Sprintf("%s/%s", keys[l-4], keys[l-3])
-	return domainProject, keys[l-2], keys[l-1]
+	return getLast3Keys(key)
+}
+
+func GetInfoFromSchemaContentKV(key []byte) (domainProject, hash string) {
+	return getLast2Keys(key)
 }
 
 func GetInfoFromDependencyQueueKV(key []byte) (consumerID, domainProject, uuid string) {
-	keys := ToResponse(key)
-	l := len(keys)
-	if l < 4 {
-		return
-	}
-	consumerID = keys[l-2]
-	domainProject = fmt.Sprintf("%s/%s", keys[l-4], keys[l-3])
-	uuid = keys[l-1]
+	domainProject, consumerID, uuid = getLast3Keys(key)
 	return
 }
 
 func GetInfoFromDependencyRuleKV(key []byte) (t string, _ *discovery.MicroServiceKey) {
-	keys := ToResponse(key)
+	keys := splitKey(key)
 	l := len(keys)
 	if l < 5 {
 		return "", nil
@@ -168,4 +144,8 @@ func GetInfoFromDependencyRuleKV(key []byte) (t string, _ *discovery.MicroServic
 		ServiceName: keys[l-2],
 		Version:     keys[l-1],
 	}
+}
+
+func SplitDomainProject(domainProject string) (string, string) {
+	return stringutil.SplitToTwo(domainProject, SPLIT)
 }

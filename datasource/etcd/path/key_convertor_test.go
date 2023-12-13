@@ -43,7 +43,7 @@ func TestGetInfoFromKV(t *testing.T) {
 	assert.False(t, d != "a")
 
 	d = path.GetInfoFromDomainKV([]byte("sdf"))
-	assert.False(t, d != "")
+	assert.False(t, d != "sdf")
 
 	p := ""
 	d, p = path.GetInfoFromProjectKV([]byte(path.GenerateProjectKey("a", "b")))
@@ -51,13 +51,6 @@ func TestGetInfoFromKV(t *testing.T) {
 
 	d, p = path.GetInfoFromProjectKV([]byte("sdf"))
 	assert.False(t, d != "" || p != "")
-
-	var r string
-	s, r, d = path.GetInfoFromRuleKV([]byte(path.GenerateServiceRuleKey("a/b", "c", "d")))
-	assert.False(t, d != "a/b" || s != "c" || r != "d")
-
-	s, r, d = path.GetInfoFromRuleKV([]byte("sdf"))
-	assert.False(t, d != "" || s != "" || r != "")
 
 	s, d = path.GetInfoFromTagKV([]byte(path.GenerateServiceTagKey("a/b", "c")))
 	assert.False(t, d != "a/b" || s != "c")
@@ -95,6 +88,12 @@ func TestGetInfoFromKV(t *testing.T) {
 	d, s, m = path.GetInfoFromSchemaKV([]byte("sdf"))
 	assert.False(t, m != "" || s != "" || d != "")
 
+	d, h := path.GetInfoFromSchemaContentKV([]byte(path.GenerateServiceSchemaContentKey("a/b", "c")))
+	assert.False(t, h != "c" || d != "a/b")
+
+	d, h = path.GetInfoFromSchemaContentKV([]byte("sdf"))
+	assert.False(t, h != "" || d != "")
+
 	u := ""
 	s, d, u = path.GetInfoFromDependencyQueueKV([]byte(path.GenerateConsumerDependencyQueueKey("a/b", "c", "d")))
 	assert.False(t, s != "c" || d != "a/b" || u != "d")
@@ -103,13 +102,6 @@ func TestGetInfoFromKV(t *testing.T) {
 	assert.False(t, s != "" || d != "" || u != "")
 
 	dt, k := path.GetInfoFromDependencyRuleKV([]byte(path.GenerateProviderDependencyRuleKey("a/b", &discovery.MicroServiceKey{
-		Tenant:      "a/b",
-		AppId:       "c",
-		ServiceName: "*",
-	})))
-	assert.False(t, dt != path.DepsProvider || k == nil || k.AppId != "" || k.ServiceName != "*")
-
-	dt, k = path.GetInfoFromDependencyRuleKV([]byte(path.GenerateProviderDependencyRuleKey("a/b", &discovery.MicroServiceKey{
 		Tenant:      "a/b",
 		AppId:       "c",
 		ServiceName: "d",

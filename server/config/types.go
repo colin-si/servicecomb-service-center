@@ -19,6 +19,7 @@ package config
 
 import (
 	"github.com/apache/servicecomb-service-center/pkg/plugin"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 const (
@@ -26,14 +27,19 @@ const (
 	EnvironmentProd = "prod"
 )
 
-//AppConfig is yaml file struct
+// AppConfig is yaml file struct
 type AppConfig struct {
-	Gov     *Gov          `yaml:"gov"`
-	Server  *ServerConfig `yaml:"server"`
-	Metrics *Metrics      `yaml:"metrics"`
+	Gov    *Gov          `yaml:"gov"`
+	Server *ServerConfig `yaml:"server"`
 }
 type Gov struct {
-	DistOptions []DistributorOptions `yaml:"plugins"`
+	DistMap    map[string]DistributorOptions `json:"-" yaml:",inline"`
+	MatchGroup *Policy                       `json:"match-group" yaml:"-"`
+	Policies   Policies                      `yaml:"-"`
+}
+type Policies map[string]Policy
+type Policy struct {
+	ValidationSpec *spec.Schema
 }
 type DistributorOptions struct {
 	Name     string `yaml:"name"`
@@ -47,11 +53,4 @@ func (c *AppConfig) GetImplName(kind plugin.Kind) string {
 }
 func (c *AppConfig) GetPluginDir() string {
 	return c.Server.Config.PluginsDir
-}
-
-// Metrics is the configurations of metrics
-type Metrics struct {
-	Enable   bool   `yaml:"enable"`
-	Interval string `yaml:"interval"`
-	Exporter string `yaml:"exporter"`
 }

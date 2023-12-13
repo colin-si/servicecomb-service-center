@@ -19,35 +19,40 @@ package mongo
 
 import (
 	"context"
+	"strconv"
+	"time"
 
-	"github.com/go-chassis/cari/rbac"
+	dmongo "github.com/go-chassis/cari/db/mongo"
+	rbacmodel "github.com/go-chassis/cari/rbac"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client/model"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/dao"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/model"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/sync"
 	mutil "github.com/apache/servicecomb-service-center/datasource/mongo/util"
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 )
 
-type RoleManager struct {
-}
-
-func (ds *RoleManager) CreateRole(ctx context.Context, r *rbac.Role) error {
+func (ds *RbacDAO) CreateRole(ctx context.Context, r *rbacmodel.Role) error {
 	exist, err := ds.RoleExist(ctx, r.Name)
 	if err != nil {
 		log.Error("failed to query role", err)
 		return err
 	}
 	if exist {
-		return datasource.ErrRoleDuplicated
+		return rbac.ErrRoleDuplicated
 	}
 	r.ID = util.GenerateUUID()
-	_, err = client.GetMongoClient().Insert(ctx, model.CollectionRole, r)
+	r.CreateTime = strconv.FormatInt(time.Now().Unix(), 10)
+	r.UpdateTime = r.CreateTime
+	err = createRoleTxn(ctx, r)
 	if err != nil {
-		if client.IsDuplicateKey(err) {
-			return datasource.ErrRoleDuplicated
+		if dao.IsDuplicateKey(err) {
+			return rbac.ErrRoleDuplicated
 		}
 		return err
 	}
@@ -55,9 +60,19 @@ func (ds *RoleManager) CreateRole(ctx context.Context, r *rbac.Role) error {
 	return nil
 }
 
-func (ds *RoleManager) RoleExist(ctx context.Context, name string) (bool, error) {
+func createRoleTxn(ctx context.Context, r *rbacmodel.Role) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionRole).InsertOne(ctx, r)
+		if err != nil {
+			return err
+		}
+		return sync.DoCreateOpts(sessionContext, datasource.ResourceRole, r)
+	})
+}
+
+func (ds *RbacDAO) RoleExist(ctx context.Context, name string) (bool, error) {
 	filter := mutil.NewFilter(mutil.RoleName(name))
-	count, err := client.GetMongoClient().Count(ctx, model.CollectionRole, filter)
+	count, err := dmongo.GetClient().GetDB().Collection(model.CollectionRole).CountDocuments(ctx, filter)
 	if err != nil {
 		return false, err
 	}
@@ -67,17 +82,14 @@ func (ds *RoleManager) RoleExist(ctx context.Context, name string) (bool, error)
 	return true, nil
 }
 
-func (ds *RoleManager) GetRole(ctx context.Context, name string) (*rbac.Role, error) {
+func (ds *RbacDAO) GetRole(ctx context.Context, name string) (*rbacmodel.Role, error) {
 	filter := mutil.NewFilter(mutil.RoleName(name))
-	result, err := client.GetMongoClient().FindOne(ctx, model.CollectionRole, filter)
-	if err != nil {
-		return nil, err
-	}
+	result := dmongo.GetClient().GetDB().Collection(model.CollectionRole).FindOne(ctx, filter)
 	if result.Err() != nil {
-		return nil, datasource.ErrRoleNotExist
+		return nil, rbac.ErrRoleNotExist
 	}
-	var role rbac.Role
-	err = result.Decode(&role)
+	var role rbacmodel.Role
+	err := result.Decode(&role)
 	if err != nil {
 		log.Error("failed to decode role", err)
 		return nil, err
@@ -85,16 +97,16 @@ func (ds *RoleManager) GetRole(ctx context.Context, name string) (*rbac.Role, er
 	return &role, nil
 }
 
-func (ds *RoleManager) ListRole(ctx context.Context) ([]*rbac.Role, int64, error) {
+func (ds *RbacDAO) ListRole(ctx context.Context) ([]*rbacmodel.Role, int64, error) {
 	filter := mutil.NewFilter()
-	cursor, err := client.GetMongoClient().Find(ctx, model.CollectionRole, filter)
+	cursor, err := dmongo.GetClient().GetDB().Collection(model.CollectionRole).Find(ctx, filter)
 	if err != nil {
 		return nil, 0, err
 	}
-	var roles []*rbac.Role
+	var roles []*rbacmodel.Role
 	defer cursor.Close(ctx)
 	for cursor.Next(ctx) {
-		var role rbac.Role
+		var role rbacmodel.Role
 		err = cursor.Decode(&role)
 		if err != nil {
 			log.Error("failed to decode role", err)
@@ -105,36 +117,55 @@ func (ds *RoleManager) ListRole(ctx context.Context) ([]*rbac.Role, int64, error
 	return roles, int64(len(roles)), nil
 }
 
-func (ds *RoleManager) DeleteRole(ctx context.Context, name string) (bool, error) {
-	n, err := client.Count(ctx, model.CollectionAccount, bson.M{"roles": bson.M{"$in": []string{name}}})
+func (ds *RbacDAO) DeleteRole(ctx context.Context, name string) (bool, error) {
+	n, err := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).CountDocuments(ctx,
+		bson.M{"roles": bson.M{"$in": []string{name}}})
 	if err != nil {
 		return false, err
 	}
 	if n > 0 {
-		return false, datasource.ErrRoleBindingExist
+		return false, rbac.ErrRoleBindingExist
 	}
-	filter := mutil.NewFilter(mutil.RoleName(name))
-	result, err := client.DeleteDoc(ctx, model.CollectionRole, filter)
+	err = deleteRoleTxn(ctx, name)
 	if err != nil {
 		return false, err
-	}
-	if result.DeletedCount == 0 {
-		return false, nil
 	}
 	return true, nil
 }
 
-func (ds *RoleManager) UpdateRole(ctx context.Context, name string, role *rbac.Role) error {
+func deleteRoleTxn(ctx context.Context, name string) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		filter := mutil.NewFilter(mutil.RoleName(name))
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionRole).DeleteOne(ctx, filter)
+		if err != nil {
+			return err
+		}
+		return sync.DoDeleteOpts(sessionContext, datasource.ResourceRole, name, name)
+	})
+}
+
+func (ds *RbacDAO) UpdateRole(ctx context.Context, name string, role *rbacmodel.Role) error {
 	filter := mutil.NewFilter(mutil.RoleName(name))
 	setFilter := mutil.NewFilter(
 		mutil.ID(role.ID),
 		mutil.RoleName(role.Name),
 		mutil.Perms(role.Perms),
+		mutil.RoleUpdateTime(strconv.FormatInt(time.Now().Unix(), 10)),
 	)
 	updateFilter := mutil.NewFilter(mutil.Set(setFilter))
-	_, err := client.GetMongoClient().Update(ctx, model.CollectionRole, filter, updateFilter)
-	if err != nil {
-		return err
-	}
+	return updateRoleTxn(ctx, filter, updateFilter, role)
+}
+
+func updateRoleTxn(ctx context.Context, filter bson.M, updateFilter bson.M, role *rbacmodel.Role) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionRole).UpdateMany(ctx, filter, updateFilter)
+		if err != nil {
+			return err
+		}
+		return sync.DoUpdateOpts(sessionContext, datasource.ResourceRole, role)
+	})
+}
+
+func (ds *RbacDAO) MigrateOldRoles(ctx context.Context) error {
 	return nil
 }

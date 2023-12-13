@@ -18,12 +18,14 @@
 package event
 
 import (
+	"fmt"
+
 	pb "github.com/go-chassis/cari/discovery"
 
 	"github.com/apache/servicecomb-service-center/datasource/etcd/cache"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 )
 
@@ -32,11 +34,11 @@ import (
 type DependencyRuleEventHandler struct {
 }
 
-func (h *DependencyRuleEventHandler) Type() sd.Type {
-	return kv.DependencyRule
+func (h *DependencyRuleEventHandler) Type() kvstore.Type {
+	return sd.TypeDependencyRule
 }
 
-func (h *DependencyRuleEventHandler) OnEvent(evt sd.KvEvent) {
+func (h *DependencyRuleEventHandler) OnEvent(evt kvstore.Event) {
 	action := evt.Type
 	if action != pb.EVT_UPDATE && action != pb.EVT_DELETE {
 		return
@@ -45,8 +47,8 @@ func (h *DependencyRuleEventHandler) OnEvent(evt sd.KvEvent) {
 	if t != path.DepsProvider {
 		return
 	}
-	log.Debugf("caught [%s] provider rule[%s/%s/%s/%s] event",
-		action, providerKey.Environment, providerKey.AppId, providerKey.ServiceName, providerKey.Version)
+	log.Debug(fmt.Sprintf("caught [%s] provider rule[%s/%s/%s/%s] event",
+		action, providerKey.Environment, providerKey.AppId, providerKey.ServiceName, providerKey.Version))
 	cache.DependencyRule.Remove(providerKey)
 }
 

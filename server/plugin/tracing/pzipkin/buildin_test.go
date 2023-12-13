@@ -21,8 +21,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client/remote"
+	"github.com/little-cui/etcdadpt"
+
 	"github.com/apache/servicecomb-service-center/server/config"
 	"github.com/apache/servicecomb-service-center/server/core"
 	"github.com/apache/servicecomb-service-center/server/plugin/tracing"
@@ -68,10 +68,12 @@ func TestZipkin_XBegin(t *testing.T) {
 
 	zk.ClientEnd(span, 0, "")
 
-	span = zk.ClientBegin("x", &tracing.Operation{
+	op := etcdadpt.OpGet()
+	span = zk.ClientBegin("x", &tracing.Request{
 		Ctx:      req.Context(),
-		Options:  &remote.EtcdOptions{PluginOp: client.OpGet()},
 		Endpoint: "x",
+		Method:   op.Action.String(),
+		URL:      op.URI(),
 	})
 	if span == nil {
 		t.Fatalf("TestZipkin_XBegin failed")

@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 const (
@@ -120,6 +122,13 @@ func SetRequestContext(r *http.Request, key CtxKey, val interface{}) *http.Reque
 	}
 	return r
 }
+func SetFiberContext(c *fiber.Ctx, key CtxKey, val interface{}) {
+	ctx := c.UserContext()
+	ctx = SetContext(ctx, key, val)
+	if ctx != c.UserContext() {
+		c.SetUserContext(ctx)
+	}
+}
 
 func ParseDomainProject(ctx context.Context) string {
 	return ParseDomain(ctx) + SPLIT + ParseProject(ctx)
@@ -197,12 +206,28 @@ func WithNoCache(ctx context.Context) context.Context {
 	return SetContext(ctx, CtxNocache, "1")
 }
 
+func NoCache(ctx context.Context) bool {
+	return ctx.Value(CtxNocache) == "1"
+}
+
 func WithCacheOnly(ctx context.Context) context.Context {
 	return SetContext(ctx, CtxCacheOnly, "1")
 }
 
+func CacheOnly(ctx context.Context) bool {
+	return ctx.Value(CtxCacheOnly) == "1"
+}
+
 func WithGlobal(ctx context.Context) context.Context {
 	return SetContext(ctx, CtxGlobal, "1")
+}
+
+func Global(ctx context.Context) bool {
+	return ctx.Value(CtxGlobal) == "1"
+}
+
+func EnableSync(ctx context.Context) bool {
+	return ctx.Value(CtxEnableSync) == "1"
 }
 
 func WithRequestRev(ctx context.Context, rev string) context.Context {

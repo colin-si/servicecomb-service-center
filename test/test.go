@@ -15,32 +15,69 @@
  * limitations under the License.
  */
 
-//Package test prepare service center required module before UT
+// Package test prepare service center required module before UT
 package test
 
 import (
+	"context"
+	"time"
+
 	_ "github.com/apache/servicecomb-service-center/server/init"
-	"github.com/apache/servicecomb-service-center/server/service/disco"
+
+	_ "github.com/apache/servicecomb-service-center/syncer/bootstrap"
 
 	_ "github.com/apache/servicecomb-service-center/server/bootstrap"
 
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/server/core"
+	edatasource "github.com/apache/servicecomb-service-center/eventbase/datasource"
+	"github.com/apache/servicecomb-service-center/server/metrics"
+	"github.com/apache/servicecomb-service-center/server/service/registry"
+	"github.com/go-chassis/cari/db"
+	"github.com/go-chassis/cari/db/config"
 	"github.com/go-chassis/go-archaius"
 )
 
 func init() {
+	var kind = "etcd"
+	var uri = "http://127.0.0.1:2379"
+	_ = archaius.Set("rbac.releaseLockAfter", "3s")
+	_ = archaius.Set("registry.instance.properties.engineID", "test_engineID")
+	_ = archaius.Set("registry.instance.properties.engineName", "test_engineName")
+	if IsETCD() {
+		_ = archaius.Set("registry.cache.mode", 0)
+		_ = archaius.Set("discovery.kind", "etcd")
+		_ = archaius.Set("registry.kind", "etcd")
+		_ = archaius.Set("registry.etcd.cluster.name", "sc-0")
+		_ = archaius.Set("registry.etcd.cluster.endpoints", "sc-0="+uri+",sc-1=http://127.0.0.2:2379")
+	} else {
+		_ = archaius.Set("registry.heartbeat.kind", "checker")
+		kind = "mongo"
+		uri = "mongodb://127.0.0.1:27017"
+	}
+
+	_ = datasource.Init(datasource.Options{
+		Kind: kind,
+	})
+	_ = metrics.Init(metrics.Options{})
+
+	_ = db.Init(&config.Config{
+		Kind:    kind,
+		URI:     uri,
+		Timeout: 10 * time.Second,
+	})
+
+	_ = edatasource.Init(&edatasource.Config{
+		Kind:   kind,
+		Logger: nil,
+	})
+
+	_ = registry.SelfRegister(context.Background())
+}
+
+func IsETCD() bool {
 	t := archaius.Get("TEST_MODE")
 	if t == nil {
 		t = "etcd"
 	}
-	if t == "etcd" {
-		archaius.Set("registry.cache.mode", 0)
-		archaius.Set("discovery.kind", "etcd")
-		archaius.Set("registry.kind", "etcd")
-	} else {
-		archaius.Set("registry.heartbeat.kind", "checker")
-	}
-	datasource.Init(datasource.Options{Kind: datasource.Kind(t.(string))})
-	core.ServiceAPI = disco.AssembleResources()
+	return t == "etcd"
 }

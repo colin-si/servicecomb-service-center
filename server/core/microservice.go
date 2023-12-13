@@ -19,9 +19,10 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
-	"github.com/apache/servicecomb-service-center/pkg/proto"
+	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/config"
 	"github.com/apache/servicecomb-service-center/version"
@@ -29,44 +30,29 @@ import (
 )
 
 var (
-	ServiceAPI         proto.ServiceCtrlServer
-	Service            *discovery.MicroService
-	Instance           *discovery.MicroServiceInstance
-	globalServiceNames map[string]struct{}
+	Service  = &discovery.MicroService{}
+	Instance = &discovery.MicroServiceInstance{}
 )
 
 const (
-	RegistryDomain        = "default"
-	RegistryProject       = "default"
-	RegistryDomainProject = "default/default"
-
-	RegistryAppID        = "default"
 	RegistryServiceName  = "SERVICECENTER"
 	RegistryServiceAlias = "SERVICECENTER"
 
-	RegistryDefaultLeaseRenewalinterval int32 = 30
-	RegistryDefaultLeaseRetrytimes      int32 = 3
+	RegistryDefaultLeaseRenewalInterval int32 = 30
+	RegistryDefaultLeaseRetryTimes      int32 = 3
 
 	CtxScSelf util.CtxKey = "_sc_self"
 )
 
-func init() {
-	prepareSelfRegistration()
-}
-
-func prepareSelfRegistration() {
+func InitRegistration() {
 	Service = &discovery.MicroService{
 		Environment: discovery.ENV_PROD,
-		AppId:       RegistryAppID,
+		AppId:       datasource.RegistryAppID,
 		ServiceName: RegistryServiceName,
 		Alias:       RegistryServiceAlias,
 		Version:     version.Ver().Version,
 		Status:      discovery.MS_UP,
 		Level:       "BACK",
-		Schemas: []string{
-			"servicecenter.grpc.api.ServiceCtrl",
-			"servicecenter.grpc.api.ServiceInstanceCtrl",
-		},
 		Properties: map[string]string{
 			discovery.PropAllowCrossApp: "true",
 		},
@@ -76,47 +62,48 @@ func prepareSelfRegistration() {
 	}
 
 	Instance = &discovery.MicroServiceInstance{
-		Status: discovery.MSI_UP,
+		Status:    discovery.MSI_UP,
+		HostName:  util.HostName(),
+		Endpoints: getEndpoints(),
 		HealthCheck: &discovery.HealthCheck{
 			Mode:     discovery.CHECK_BY_HEARTBEAT,
-			Interval: RegistryDefaultLeaseRenewalinterval,
-			Times:    RegistryDefaultLeaseRetrytimes,
+			Interval: RegistryDefaultLeaseRenewalInterval,
+			Times:    RegistryDefaultLeaseRetryTimes,
 		},
+	}
+
+	name := config.GetString("registry.instance.datacenter.name", "")
+	region := config.GetString("registry.instance.datacenter.region", "")
+	availableZone := config.GetString("registry.instance.datacenter.availableZone", "")
+	if len(name) > 0 && len(region) > 0 && len(availableZone) > 0 {
+		Instance.DataCenterInfo = &discovery.DataCenterInfo{
+			Name:          name,
+			Region:        region,
+			AvailableZone: availableZone,
+		}
 	}
 }
 
-func AddDefaultContextValue(ctx context.Context) context.Context {
-	return util.WithNoCache(util.SetContext(util.SetDomainProject(ctx,
-		RegistryDomain, RegistryProject),
-		CtxScSelf, true))
-}
-
-func IsDefaultDomainProject(domainProject string) bool {
-	return domainProject == RegistryDomainProject
+func getEndpoints() []string {
+	hostPort := config.GetString("registry.instance.endpoint",
+		config.GetString("server.host", "127.0.0.1", config.WithStandby("httpaddr")))
+	if strings.LastIndex(hostPort, ":") < 0 {
+		hostPort += ":" + config.GetString("server.port", "30100", config.WithStandby("httpport"))
+	}
+	endpoint := fmt.Sprintf("rest://%s/", hostPort)
+	if config.GetSSL().SslEnabled {
+		endpoint += "?sslEnabled=true"
+	}
+	return []string{endpoint}
 }
 
 func RegisterGlobalServices() {
-	globalServiceNames = make(map[string]struct{})
 	for _, s := range strings.Split(config.GetRegistry().GlobalVisible, ",") {
 		if len(s) > 0 {
-			globalServiceNames[s] = struct{}{}
+			datasource.RegisterGlobalService(s)
 		}
 	}
-	globalServiceNames[Service.ServiceName] = struct{}{}
-}
-
-func IsGlobal(key *discovery.MicroServiceKey) bool {
-	if !IsDefaultDomainProject(key.Tenant) {
-		return false
-	}
-	if key.AppId != RegistryAppID {
-		return false
-	}
-	_, ok := globalServiceNames[key.ServiceName]
-	if !ok {
-		_, ok = globalServiceNames[key.Alias]
-	}
-	return ok
+	datasource.RegisterGlobalService(Service.ServiceName)
 }
 
 func IsSCInstance(ctx context.Context) bool {

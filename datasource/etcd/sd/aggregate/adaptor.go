@@ -1,39 +1,44 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package aggregate
 
 import (
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
+	"fmt"
+
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 )
 
-// Aggregator implements sd.Adaptor.
+// Aggregator implements state.State.
 // Aggregator is an aggregator of multi Adaptors, and it aggregates all the
 // Adaptors' data as it's result.
 type Aggregator struct {
 	// Indexer searches data from all the adapters
-	sd.Indexer
-	Type     sd.Type
-	Adaptors []sd.Adaptor
+	kvstore.Indexer
+	Type     kvstore.Type
+	Adaptors []state.State
 }
 
 // Cache gets all the adapters' cache
-func (as *Aggregator) Cache() sd.CacheReader {
+func (as *Aggregator) Cache() kvstore.CacheReader {
 	var cache Cache
 	for _, a := range as.Adaptors {
 		cache = append(cache, a.Cache())
@@ -60,37 +65,37 @@ func (as *Aggregator) Ready() <-chan struct{} {
 	return closedCh
 }
 
-func getLogConflictFunc(t sd.Type) func(origin, conflict *sd.KeyValue) {
+func getLogConflictFunc(t kvstore.Type) func(origin, conflict *kvstore.KeyValue) {
 	switch t {
-	case kv.ServiceIndex:
-		return func(origin, conflict *sd.KeyValue) {
+	case sd.TypeServiceIndex:
+		return func(origin, conflict *kvstore.KeyValue) {
 			if serviceID, conflictID := origin.Value.(string), conflict.Value.(string); conflictID != serviceID {
 				key := path.GetInfoFromSvcIndexKV(conflict.Key)
-				log.Warnf("conflict! can not merge microservice index[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
+				log.Warn(fmt.Sprintf("conflict! can not merge microservice index[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
 					conflict.ClusterName, conflictID, key.Environment, key.AppId, key.ServiceName, key.Version,
-					serviceID, origin.ClusterName)
+					serviceID, origin.ClusterName))
 			}
 		}
-	case kv.ServiceAlias:
-		return func(origin, conflict *sd.KeyValue) {
+	case sd.TypeServiceAlias:
+		return func(origin, conflict *kvstore.KeyValue) {
 			if serviceID, conflictID := origin.Value.(string), conflict.Value.(string); conflictID != serviceID {
 				key := path.GetInfoFromSvcAliasKV(conflict.Key)
-				log.Warnf("conflict! can not merge microservice alias[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
+				log.Warn(fmt.Sprintf("conflict! can not merge microservice alias[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
 					conflict.ClusterName, conflictID, key.Environment, key.AppId, key.ServiceName, key.Version,
-					serviceID, origin.ClusterName)
+					serviceID, origin.ClusterName))
 			}
 		}
 	}
 	return nil
 }
 
-func NewAggregator(t sd.Type, cfg *sd.Config) *Aggregator {
+func NewAggregator(t kvstore.Type, cfg *kvstore.Options) *Aggregator {
 	as := &Aggregator{Type: t}
 	for _, name := range repos {
 		// create and get all plugin instances
-		repo, err := sd.New(sd.Options{Kind: sd.Kind(name)})
+		repo, err := state.NewRepository(state.Config{Kind: name})
 		if err != nil {
-			log.Errorf(err, "failed to new plugin instance[%s]", name)
+			log.Error(fmt.Sprintf("failed to new plugin instance[%s]", name), err)
 			continue
 		}
 		as.Adaptors = append(as.Adaptors, repo.New(t, cfg))
@@ -98,7 +103,7 @@ func NewAggregator(t sd.Type, cfg *sd.Config) *Aggregator {
 	as.Indexer = NewAggregatorIndexer(as)
 
 	switch t {
-	case kv.ServiceIndex, kv.ServiceAlias:
+	case sd.TypeServiceIndex, sd.TypeServiceAlias:
 		NewConflictChecker(as.Cache(), getLogConflictFunc(t))
 	}
 	return as

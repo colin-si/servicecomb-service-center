@@ -19,10 +19,11 @@ package chain
 
 import (
 	"context"
+	"fmt"
 
-	errorsEx "github.com/apache/servicecomb-service-center/pkg/errors"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/go-chassis/cari/discovery"
 )
 
 type InvocationOption func(op InvocationOp) InvocationOp
@@ -67,7 +68,8 @@ func (i *Invocation) WithContext(key util.CtxKey, val interface{}) *Invocation {
 // and the callbacks seq like below:
 // when i.Next(WithFunc(CB1)).Next(WithAsyncFunc(CB2)).Next(WithFunc(CB3)).Invoke(CB0)
 // then i.Success/Fail() -> CB3 -> CB1 -> CB0(invoke)             goroutine 0
-//                                              \-> CB2(async)    goroutine 1
+//
+//	\-> CB2(async)    goroutine 1
 func (i *Invocation) Next(opts ...InvocationOption) {
 	var op InvocationOp
 	for _, opt := range opts {
@@ -119,7 +121,7 @@ func (i *Invocation) Invoke(last CallbackFunc) {
 		// this recover only catch the exceptions raised in sync invocations.
 		// The async invocations will be catch by gopool pkg then it never
 		// change the callback results.
-		i.Fail(errorsEx.Internal(itf))
+		i.Fail(discovery.NewError(discovery.ErrInternal, fmt.Sprintf("%v", itf)))
 	}()
 	i.Func = last
 	i.chain.Next(i)

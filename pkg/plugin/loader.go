@@ -19,7 +19,6 @@ package plugin
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"plugin"
@@ -50,7 +49,7 @@ func (pm *Loader) Init() {
 
 	err := pm.ReloadPlugins()
 	if len(pm.Plugins) == 0 {
-		log.Errorf(err, "no any plugin has been loaded")
+		log.Error("no any plugin has been loaded", err)
 	}
 }
 
@@ -63,13 +62,13 @@ func (pm *Loader) ReloadPlugins() error {
 		return fmt.Errorf("'plugins_dir' is unset")
 	}
 
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 
 	for _, file := range files {
-		if !file.Mode().IsRegular() {
+		if !file.Type().IsRegular() {
 			continue
 		}
 
@@ -84,7 +83,7 @@ func (pm *Loader) ReloadPlugins() error {
 		if err != nil {
 			return fmt.Errorf("load plugin '%s' error for %s", submatchs[1], err.Error())
 		}
-		log.Infof("load plugin '%s' successfully", submatchs[1])
+		log.Info(fmt.Sprintf("load plugin '%s' successfully", submatchs[1]))
 
 		pm.mux.Lock()
 		pm.Plugins[submatchs[1]] = &wrapPlugin{p, make(map[string]plugin.Symbol, 10)}

@@ -22,15 +22,15 @@ import (
 	"errors"
 	"fmt"
 
+	dmongo "github.com/go-chassis/cari/db/mongo"
 	"github.com/go-chassis/cari/discovery"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client/dao"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client/model"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/model"
 	mutil "github.com/apache/servicecomb-service-center/datasource/mongo/util"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
@@ -39,142 +39,126 @@ import (
 type DepManager struct {
 }
 
-func (ds *DepManager) SearchProviderDependency(ctx context.Context, request *discovery.GetDependenciesRequest) (*discovery.GetProDependenciesResponse, error) {
+func (ds *DepManager) ListConsumers(ctx context.Context, request *discovery.GetDependenciesRequest) (*discovery.GetProDependenciesResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 	providerServiceID := request.ServiceId
-	filter := mutil.NewBasicFilter(ctx, mutil.ServiceServiceID(providerServiceID))
-	provider, err := dao.GetService(ctx, filter)
+	provider, err := GetServiceByID(ctx, providerServiceID)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("query provider service failed, there is no provider %s in db", providerServiceID))
-			return &discovery.GetProDependenciesResponse{
-				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Provider does not exist"),
-			}, nil
+			return nil, discovery.NewError(discovery.ErrServiceNotExists, "Provider does not exist")
 		}
 		log.Error(fmt.Sprintf("query provider from db error, provider is %s", providerServiceID), err)
 		return nil, err
 	}
 	if provider == nil {
-		log.Error(fmt.Sprintf("GetProviderDependencies failed for provider %s", providerServiceID), err)
-		return &discovery.GetProDependenciesResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Provider does not exist"),
-		}, nil
+		log.Error(fmt.Sprintf("ListConsumers failed for provider %s", providerServiceID), err)
+		return nil, discovery.NewError(discovery.ErrServiceNotExists, "Provider does not exist")
 	}
 
-	dr := NewProviderDependencyRelation(ctx, domainProject, provider.Service)
-	services, err := dr.GetDependencyConsumers(ToDependencyFilterOptions(request)...)
+	services, err := GetConsumers(ctx, domainProject, provider.Service, ToDependencyFilterOptions(request)...)
 	if err != nil {
-		log.Error(fmt.Sprintf("GetProviderDependencies failed, provider is %s/%s/%s/%s",
+		log.Error(fmt.Sprintf("ListConsumers failed, provider is %s/%s/%s/%s",
 			provider.Service.Environment, provider.Service.AppId, provider.Service.ServiceName, provider.Service.Version), err)
-		return &discovery.GetProDependenciesResponse{
-			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
-		}, err
+		return nil, discovery.NewError(discovery.ErrInternal, err.Error())
 	}
 
 	return &discovery.GetProDependenciesResponse{
-		Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Get all consumers successful."),
 		Consumers: services,
 	}, nil
 }
 
-func (ds *DepManager) SearchConsumerDependency(ctx context.Context, request *discovery.GetDependenciesRequest) (*discovery.GetConDependenciesResponse, error) {
+func (ds *DepManager) ListProviders(ctx context.Context, request *discovery.GetDependenciesRequest) (*discovery.GetConDependenciesResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 	consumerID := request.ServiceId
-	filter := mutil.NewBasicFilter(ctx, mutil.ServiceServiceID(consumerID))
-	consumer, err := dao.GetService(ctx, filter)
+	consumer, err := GetServiceByID(ctx, consumerID)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("query consumer service failed, there is no consumer %s in db", consumerID))
-			return &discovery.GetConDependenciesResponse{
-				Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Consumer does not exist"),
-			}, nil
+			return nil, discovery.NewError(discovery.ErrServiceNotExists, "Consumer does not exist")
 		}
 		log.Error(fmt.Sprintf("query consumer from db error, consumer is %s", consumerID), err)
 		return nil, err
 	}
 	if consumer == nil {
-		log.Error(fmt.Sprintf("GetConsumerDependencies failed for consumer %s does not exist", consumerID), err)
-		return &discovery.GetConDependenciesResponse{
-			Response: discovery.CreateResponse(discovery.ErrServiceNotExists, "Consumer does not exist"),
-		}, nil
+		log.Error(fmt.Sprintf("ListProviders failed for consumer %s does not exist", consumerID), err)
+		return nil, discovery.NewError(discovery.ErrServiceNotExists, "Consumer does not exist")
 	}
 
-	dr := NewConsumerDependencyRelation(ctx, domainProject, consumer.Service)
-	services, err := dr.GetDependencyProviders(ToDependencyFilterOptions(request)...)
+	services, err := GetProviders(ctx, domainProject, consumer.Service, ToDependencyFilterOptions(request)...)
 	if err != nil {
 		log.Error(fmt.Sprintf("query consumer failed, consumer is %s/%s/%s/%s",
 			consumer.Service.Environment, consumer.Service.AppId, consumer.Service.ServiceName, consumer.Service.Version), err)
-		return &discovery.GetConDependenciesResponse{
-			Response: discovery.CreateResponse(discovery.ErrInternal, err.Error()),
-		}, err
+		return nil, discovery.NewError(discovery.ErrInternal, err.Error())
 	}
 
 	return &discovery.GetConDependenciesResponse{
-		Response:  discovery.CreateResponse(discovery.ResponseSuccess, "Get all providers successfully."),
 		Providers: services,
 	}, nil
 }
 
-func (ds *DepManager) AddOrUpdateDependencies(ctx context.Context, dependencys []*discovery.ConsumerDependency, override bool) (*discovery.Response, error) {
-	domainProject := util.ParseDomainProject(ctx)
-	for _, dependency := range dependencys {
-		consumerFlag := util.StringJoin([]string{
-			dependency.Consumer.Environment,
-			dependency.Consumer.AppId,
-			dependency.Consumer.ServiceName,
-			dependency.Consumer.Version}, "/")
-		consumerInfo := discovery.DependenciesToKeys([]*discovery.MicroServiceKey{dependency.Consumer}, domainProject)[0]
-		providersInfo := discovery.DependenciesToKeys(dependency.Providers, domainProject)
-
-		rsp := datasource.ParamsChecker(consumerInfo, providersInfo)
-		if rsp != nil {
-			log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t consumer is %s %s",
-				override, consumerFlag, rsp.Response.GetMessage()), nil)
-			return rsp.Response, nil
-		}
-
-		consumerID, err := GetServiceID(ctx, consumerInfo)
-		if err != nil && !errors.Is(err, datasource.ErrNoData) {
-			log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t, get consumer %s id failed",
-				override, consumerFlag), err)
-			return discovery.CreateResponse(discovery.ErrInternal, err.Error()), err
-		}
-		if len(consumerID) == 0 {
-			log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t consumer %s does not exist",
-				override, consumerFlag), err)
-			return discovery.CreateResponse(discovery.ErrServiceNotExists, fmt.Sprintf("Consumer %s does not exist.", consumerFlag)), nil
-		}
-
-		dependency.Override = override
-		if !override {
-			id := util.GenerateUUID()
-
-			domain := util.ParseDomain(ctx)
-			project := util.ParseProject(ctx)
-			data := &model.ConsumerDep{
-				Domain:      domain,
-				Project:     project,
-				ConsumerID:  consumerID,
-				UUID:        id,
-				ConsumerDep: dependency,
-			}
-			insertRes, err := client.GetMongoClient().Insert(ctx, model.CollectionDep, data)
-			if err != nil {
-				log.Error("failed to insert dep to mongodb", err)
-				return discovery.CreateResponse(discovery.ErrInternal, err.Error()), err
-			}
-			log.Info(fmt.Sprintf("insert dep to mongodb success %s", insertRes.InsertedID))
-		}
-		err = syncDependencyRule(ctx, domainProject, dependency)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return discovery.CreateResponse(discovery.ResponseSuccess, "Create dependency successfully."), nil
+func (ds *DepManager) PutDependencies(ctx context.Context, dependencyInfos []*discovery.ConsumerDependency, override bool) error {
+	return updateDepTxn(ctx, dependencyInfos, override)
 }
 
-func (ds *DepManager) DeleteDependency() {
-	panic("implement me")
+func updateDepTxn(ctx context.Context, dependencyInfos []*discovery.ConsumerDependency, override bool) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		domainProject := util.ParseDomainProject(ctx)
+		for _, dependency := range dependencyInfos {
+			consumerFlag := util.StringJoin([]string{
+				dependency.Consumer.Environment,
+				dependency.Consumer.AppId,
+				dependency.Consumer.ServiceName,
+				dependency.Consumer.Version}, "/")
+			consumerInfo := discovery.DependenciesToKeys([]*discovery.MicroServiceKey{dependency.Consumer}, domainProject)[0]
+			providersInfo := discovery.DependenciesToKeys(dependency.Providers, domainProject)
+
+			if err := datasource.ParamsChecker(consumerInfo, providersInfo); err != nil {
+				log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t consumer is %s",
+					override, consumerFlag), nil)
+				return err
+			}
+
+			consumerID, err := GetServiceID(ctx, consumerInfo)
+			if err != nil && !errors.Is(err, datasource.ErrNoData) {
+				log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t, get consumer %s id failed",
+					override, consumerFlag), err)
+				return discovery.NewError(discovery.ErrInternal, err.Error())
+			}
+			if len(consumerID) == 0 {
+				log.Error(fmt.Sprintf("put request into dependency queue failed, override: %t consumer %s does not exist",
+					override, consumerFlag), err)
+				return discovery.NewError(discovery.ErrServiceNotExists, fmt.Sprintf("Consumer %s does not exist.", consumerFlag))
+			}
+
+			dependency.Override = override
+			if !override {
+				id := util.GenerateUUID()
+
+				domain := util.ParseDomain(ctx)
+				project := util.ParseProject(ctx)
+				data := &model.ConsumerDep{
+					Domain:      domain,
+					Project:     project,
+					ConsumerID:  consumerID,
+					UUID:        id,
+					ConsumerDep: dependency,
+				}
+
+				insertRes, err := dmongo.GetClient().GetDB().Collection(model.CollectionDep).InsertOne(ctx, data)
+				if err != nil {
+					log.Error("failed to insert dep to mongodb", err)
+					return discovery.NewError(discovery.ErrInternal, err.Error())
+				}
+				log.Info(fmt.Sprintf("insert dep to mongodb success %s", insertRes.InsertedID))
+			}
+			err = syncDependencyRule(ctx, domainProject, dependency)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (ds *DepManager) DependencyHandle(ctx context.Context) (err error) {
@@ -197,7 +181,6 @@ func syncDependencyRule(ctx context.Context, domainProject string, r *discovery.
 	if err != nil {
 		return err
 	}
-
 	if r.Override {
 		datasource.ParseOverrideRules(ctx, &dep, oldProviderRules)
 	} else {
@@ -211,18 +194,14 @@ func GetOldProviderRules(dep *datasource.Dependency) (*discovery.MicroServiceDep
 		Dependency: []*discovery.MicroServiceKey{},
 	}
 	filter := GenerateConsumerDependencyRuleKey(dep.DomainProject, dep.Consumer)
-	findRes, err := client.GetMongoClient().FindOne(context.TODO(), model.CollectionDep, filter)
-	if err != nil {
-		log.Error(fmt.Sprintf("get dependency rule [%v] failed", filter), err)
-		return nil, err
-	}
-
+	findRes := dmongo.GetClient().GetDB().Collection(model.CollectionDep).FindOne(context.TODO(), filter)
 	if findRes.Err() != nil {
+		log.Error(fmt.Sprintf("get dependency rule [%v] failed", filter), findRes.Err())
 		return microServiceDependency, nil
 	}
 
 	var depRule *model.DependencyRule
-	err = findRes.Decode(&depRule)
+	err := findRes.Decode(&depRule)
 	if err != nil {
 		return nil, err
 	}
@@ -233,12 +212,10 @@ func updateDeps(domainProject string, dep *datasource.Dependency) error {
 	var upsert = true
 	for _, r := range dep.DeleteDependencyRuleList {
 		filter := GenerateProviderDependencyRuleKey(domainProject, r)
-		_, err := client.GetMongoClient().Update(context.TODO(), model.CollectionDep, filter, bson.M{"$pull": bson.M{mutil.ConnectWithDot([]string{model.ColumnDep, model.ColumnDependency}): dep.Consumer}})
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionDep).UpdateMany(context.TODO(), filter,
+			bson.M{"$pull": bson.M{mutil.ConnectWithDot([]string{model.ColumnDep, model.ColumnDependency}): dep.Consumer}})
 		if err != nil {
 			return err
-		}
-		if r.ServiceName == "*" {
-			break
 		}
 	}
 	for _, r := range dep.CreateDependencyRuleList {
@@ -246,17 +223,15 @@ func updateDeps(domainProject string, dep *datasource.Dependency) error {
 		data := bson.M{
 			"$addToSet": bson.M{mutil.ConnectWithDot([]string{model.ColumnDep, model.ColumnDependency}): dep.Consumer},
 		}
-		_, err := client.GetMongoClient().Update(context.TODO(), model.CollectionDep, filter, data, &options.UpdateOptions{Upsert: &upsert})
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionDep).UpdateMany(context.TODO(), filter,
+			data, &options.UpdateOptions{Upsert: &upsert})
 		if err != nil {
 			return err
-		}
-		if r.ServiceName == "*" {
-			break
 		}
 	}
 	filter := GenerateConsumerDependencyRuleKey(domainProject, dep.Consumer)
 	if len(dep.ProvidersRule) == 0 {
-		_, err := client.GetMongoClient().Delete(context.TODO(), model.CollectionDep, filter)
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionDep).DeleteMany(context.TODO(), filter)
 		if err != nil {
 			return err
 		}
@@ -264,7 +239,8 @@ func updateDeps(domainProject string, dep *datasource.Dependency) error {
 		updateData := bson.M{
 			"$set": bson.M{mutil.ConnectWithDot([]string{model.ColumnDep, model.ColumnDependency}): dep.ProvidersRule},
 		}
-		_, err := client.GetMongoClient().Update(context.TODO(), model.CollectionDep, filter, updateData, &options.UpdateOptions{Upsert: &upsert})
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionDep).UpdateMany(context.TODO(), filter,
+			updateData, &options.UpdateOptions{Upsert: &upsert})
 		if err != nil {
 			return err
 		}
@@ -324,7 +300,7 @@ func removeProviderRuleKeys(ctx context.Context, domainProject string, cache map
 }
 
 func GetDepRules(ctx context.Context, filter bson.M) ([]*model.DependencyRule, error) {
-	findRes, err := client.GetMongoClient().Find(ctx, model.CollectionDep, filter)
+	findRes, err := dmongo.GetClient().GetDB().Collection(model.CollectionDep).Find(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -348,11 +324,7 @@ func removeProviderDeps(ctx context.Context, depRule *model.DependencyRule, cach
 	}
 	exist, ok := cache[id]
 	if !ok {
-		if depRule.ServiceKey.ServiceName == "*" {
-			return nil
-		}
-
-		_, exist, err = FindServiceIds(ctx, depRule.ServiceKey.Version, depRule.ServiceKey)
+		_, exist, err = FindServiceIds(ctx, depRule.ServiceKey, false)
 		if err != nil {
 			return err
 		}
@@ -364,7 +336,7 @@ func removeProviderDeps(ctx context.Context, depRule *model.DependencyRule, cach
 		model.ColumnServiceKey: depRule.ServiceKey,
 	}
 	if !exist {
-		_, err = client.GetMongoClient().DocDelete(ctx, model.CollectionDep, filter)
+		_, err = dmongo.GetClient().GetDB().Collection(model.CollectionDep).DeleteOne(ctx, filter)
 		if err != nil {
 			return err
 		}
@@ -375,18 +347,13 @@ func removeProviderDeps(ctx context.Context, depRule *model.DependencyRule, cach
 func removeConsumerDeps(ctx context.Context, depRule *model.DependencyRule, cache map[*model.DelDepCacheKey]bool) (err error) {
 	var left []*discovery.MicroServiceKey
 	for _, key := range depRule.Dep.Dependency {
-		if key.ServiceName == "*" {
-			left = append(left, key)
-			continue
-		}
-
 		id := &model.DelDepCacheKey{
 			Key:  key,
 			Type: path.DepsProvider,
 		}
 		exist, ok := cache[id]
 		if !ok {
-			_, exist, err = FindServiceIds(ctx, key.Version, key)
+			_, exist, err = FindServiceIds(ctx, key, false)
 			if err != nil {
 				return err
 			}
@@ -405,12 +372,12 @@ func removeConsumerDeps(ctx context.Context, depRule *model.DependencyRule, cach
 		model.ColumnServiceKey: depRule.ServiceKey,
 	}
 	if len(left) == 0 {
-		_, err = client.GetMongoClient().DocDelete(ctx, model.CollectionDep, filter)
+		_, err = dmongo.GetClient().GetDB().Collection(model.CollectionDep).DeleteOne(ctx, filter)
 	} else {
 		updateData := bson.M{
 			"$set": bson.M{mutil.ConnectWithDot([]string{model.ColumnDep, model.ColumnDependency}): left},
 		}
-		_, err = client.GetMongoClient().Update(ctx, model.CollectionDep, filter, updateData)
+		_, err = dmongo.GetClient().GetDB().Collection(model.CollectionDep).UpdateMany(ctx, filter, updateData)
 	}
 	if err != nil {
 		return err
@@ -422,13 +389,10 @@ func TransferToMicroServiceDependency(ctx context.Context, filter bson.M) (*disc
 	microServiceDependency := &discovery.MicroServiceDependency{
 		Dependency: []*discovery.MicroServiceKey{},
 	}
-	findRes, err := client.GetMongoClient().FindOne(context.TODO(), model.CollectionDep, filter)
-	if err != nil {
-		return nil, err
-	}
-	if findRes.Err() == nil {
+	result := dmongo.GetClient().GetDB().Collection(model.CollectionDep).FindOne(ctx, filter)
+	if result.Err() == nil {
 		var depRule *model.DependencyRule
-		err := findRes.Decode(&depRule)
+		err := result.Decode(&depRule)
 		if err != nil {
 			return nil, err
 		}
@@ -436,60 +400,4 @@ func TransferToMicroServiceDependency(ctx context.Context, filter bson.M) (*disc
 		return microServiceDependency, nil
 	}
 	return microServiceDependency, nil
-}
-
-func GetConsumerDepInfo(ctx context.Context, filter bson.M) ([]*discovery.ConsumerDependency, error) {
-	var ConsumerDeps []*discovery.ConsumerDependency
-
-	findRes, err := client.GetMongoClient().Find(context.TODO(), model.CollectionDep, filter)
-	if err != nil {
-		return nil, err
-	}
-
-	for findRes.Next(ctx) {
-		var dep *model.ConsumerDep
-		err = findRes.Decode(&dep)
-		if err != nil {
-			return nil, err
-		}
-		ConsumerDeps = append(ConsumerDeps, dep.ConsumerDep)
-	}
-	return ConsumerDeps, nil
-}
-
-func GetServiceID(ctx context.Context, key *discovery.MicroServiceKey) (string, error) {
-	filter := mutil.NewBasicFilter(
-		ctx,
-		mutil.ServiceEnv(key.Environment),
-		mutil.ServiceAppID(key.AppId),
-		mutil.ServiceServiceName(key.ServiceName),
-		mutil.ServiceVersion(key.Version),
-	)
-	id, err := getServiceID(ctx, filter)
-	if err != nil && !errors.Is(err, datasource.ErrNoData) {
-		return "", err
-	}
-	if len(id) == 0 && len(key.Alias) != 0 {
-		filter = mutil.NewBasicFilter(
-			ctx,
-			mutil.ServiceEnv(key.Environment),
-			mutil.ServiceAppID(key.AppId),
-			mutil.ServiceAlias(key.Alias),
-			mutil.ServiceVersion(key.Version),
-		)
-		return getServiceID(ctx, filter)
-	}
-	return id, nil
-}
-
-func getServiceID(ctx context.Context, filter bson.M) (serviceID string, err error) {
-	svc, err := dao.GetService(ctx, filter)
-	if err != nil {
-		return
-	}
-	if svc != nil {
-		serviceID = svc.Service.ServiceId
-		return
-	}
-	return
 }

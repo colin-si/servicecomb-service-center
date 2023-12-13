@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package v3
 
 import (
@@ -29,8 +30,6 @@ func initRouter() {
 	roa.RegisterServant(&MicroServiceService{})
 	roa.RegisterServant(&SchemaService{})
 	roa.RegisterServant(&DependencyService{})
-	roa.RegisterServant(&TagService{})
-	roa.RegisterServant(&RuleService{})
 	roa.RegisterServant(&MicroServiceInstanceService{})
 	roa.RegisterServant(&WatchService{})
 }

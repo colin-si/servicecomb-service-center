@@ -52,18 +52,16 @@ var (
 func FindInstanceReqValidator() *validate.Validator {
 	return findInstanceReqValidator.Init(func(v *validate.Validator) {
 		v.AddRule("ConsumerServiceId", GetInstanceReqValidator().GetRule("ConsumerServiceId"))
-		v.AddRules(ExistenceReqValidator().GetRules())
-		v.AddRule("VersionRule", ExistenceReqValidator().GetRule("Version"))
+		v.AddRules(MicroServiceSearchKeyValidator().GetRules())
 		v.AddRule("Tags", UpdateTagReqValidator().GetRule("Key"))
-		v.AddRule("Environment", MicroServiceKeyValidator().GetRule("Environment"))
 	})
 }
 
-func BatchFindInstanceReqValidator() *validate.Validator {
+func FindManyInstanceReqValidator() *validate.Validator {
 	return batchFindInstanceReqValidator.Init(func(v *validate.Validator) {
 		var findServiceValidator validate.Validator
 		findServiceValidator.AddRule("Service", &validate.Rule{Min: 1})
-		findServiceValidator.AddSub("Service", ExistenceReqValidator())
+		findServiceValidator.AddSub("Service", MicroServiceSearchKeyValidator())
 		var findInstanceValidator validate.Validator
 		findInstanceValidator.AddRule("Instance", &validate.Rule{Min: 1})
 		findInstanceValidator.AddSub("Instance", HeartbeatReqValidator())
@@ -89,16 +87,16 @@ func HeartbeatReqValidator() *validate.Validator {
 	})
 }
 
-func UpdateInstanceReqValidator() *validate.Validator {
+func UpdateInstanceStatusReqValidator() *validate.Validator {
 	return updateInstanceReqValidator.Init(func(v *validate.Validator) {
-		v.AddRules(heartbeatReqValidator.GetRules())
+		v.AddRules(HeartbeatReqValidator().GetRules())
 		v.AddRule("Status", &validate.Rule{Regexp: updateInstStatusRegex})
 	})
 }
 
 func UpdateInstancePropsReqValidator() *validate.Validator {
 	return updateInstancePropsReqValidator.Init(func(v *validate.Validator) {
-		v.AddRules(heartbeatReqValidator.GetRules())
+		v.AddRules(HeartbeatReqValidator().GetRules())
 	})
 }
 
@@ -129,4 +127,32 @@ func RegisterInstanceReqValidator() *validate.Validator {
 		v.AddRule("Instance", &validate.Rule{Min: 1})
 		v.AddSub("Instance", &microServiceInstanceValidator)
 	})
+}
+
+func ValidateRegisterInstanceRequest(in *discovery.RegisterInstanceRequest) error {
+	return RegisterInstanceReqValidator().Validate(in)
+}
+func ValidateUnregisterInstanceRequest(in *discovery.UnregisterInstanceRequest) error {
+	return HeartbeatReqValidator().Validate(in)
+}
+func ValidateHeartbeatRequest(in *discovery.HeartbeatRequest) error {
+	return HeartbeatReqValidator().Validate(in)
+}
+func ValidateGetOneInstanceRequest(in *discovery.GetOneInstanceRequest) error {
+	return GetInstanceReqValidator().Validate(in)
+}
+func ValidateGetInstancesRequest(in *discovery.GetInstancesRequest) error {
+	return GetInstanceReqValidator().Validate(in)
+}
+func ValidateFindInstancesRequest(in *discovery.FindInstancesRequest) error {
+	return FindInstanceReqValidator().Validate(in)
+}
+func ValidateFindManyInstancesRequest(in *discovery.BatchFindInstancesRequest) error {
+	return FindManyInstanceReqValidator().Validate(in)
+}
+func ValidateUpdateInstanceStatusRequest(in *discovery.UpdateInstanceStatusRequest) error {
+	return UpdateInstanceStatusReqValidator().Validate(in)
+}
+func ValidateUpdateInstancePropsRequest(in *discovery.UpdateInstancePropsRequest) error {
+	return UpdateInstancePropsReqValidator().Validate(in)
 }

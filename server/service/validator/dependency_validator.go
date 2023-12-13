@@ -21,6 +21,7 @@ import (
 	"regexp"
 
 	"github.com/apache/servicecomb-service-center/pkg/validate"
+	"github.com/go-chassis/cari/discovery"
 )
 
 var (
@@ -28,16 +29,11 @@ var (
 	overwriteDependenciesReqValidator validate.Validator
 )
 
-var (
-	nameFuzzyRegex, _         = regexp.Compile(`^[a-zA-Z0-9]*$|^[a-zA-Z0-9][a-zA-Z0-9_\-.]*[a-zA-Z0-9]$|^\*$`)
-	versionAllowEmptyRegex, _ = regexp.Compile(`^(^\d+(\.\d+){0,2}\+?$|^\d+(\.\d+){0,2}-\d+(\.\d+){0,2}$|^latest$)?$`)
-)
+var versionAllowEmptyRegex, _ = regexp.Compile(`^(^\d+(\.\d+){0,2}\+?$|^\d+(\.\d+){0,2}-\d+(\.\d+){0,2}$|^latest$)?$`)
 
 func defaultDependencyValidator() *validate.Validator {
 	appIDRule := *(MicroServiceKeyValidator().GetRule("AppId"))
 	appIDRule.Min = 0
-	serviceNameRule := *(MicroServiceKeyValidator().GetRule("ServiceName"))
-	serviceNameRule.Regexp = nameFuzzyRegex
 	versionRule := &validate.Rule{Max: 128, Regexp: &validate.VersionRegexp{Fuzzy: true, Regex: versionAllowEmptyRegex}}
 
 	var (
@@ -48,7 +44,6 @@ func defaultDependencyValidator() *validate.Validator {
 
 	providerMsValidator.AddRules(MicroServiceKeyValidator().GetRules())
 	providerMsValidator.AddRule("AppId", &appIDRule)
-	providerMsValidator.AddRule("ServiceName", &serviceNameRule)
 	providerMsValidator.AddRule("Version", versionRule)
 
 	var dependenciesValidator validate.Validator
@@ -73,4 +68,14 @@ func CreateDependenciesReqValidator() *validate.Validator {
 		v.AddRule("Dependencies", &validate.Rule{Min: 1, Max: 100})
 		v.AddSub("Dependencies", defaultDependencyValidator())
 	})
+}
+
+func ValidateGetDependenciesRequest(v *discovery.GetDependenciesRequest) error {
+	return GetServiceReqValidator().Validate(v)
+}
+func ValidateCreateDependenciesRequest(v *discovery.CreateDependenciesRequest) error {
+	return CreateDependenciesReqValidator().Validate(v)
+}
+func ValidateAddDependenciesRequest(v *discovery.AddDependenciesRequest) error {
+	return AddDependenciesReqValidator().Validate(v)
 }

@@ -22,27 +22,26 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	serviceUtil "github.com/apache/servicecomb-service-center/datasource/etcd/util"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/server/config"
 	"github.com/apache/servicecomb-service-center/version"
+	"github.com/little-cui/etcdadpt"
 )
 
 func loadServerVersion(ctx context.Context) error {
-	resp, err := client.Instance().Do(ctx,
-		client.GET, client.WithStrKey(path.GetServerInfoKey()))
+	kv, err := etcdadpt.Get(ctx, path.GetServerInfoKey())
 	if err != nil {
 		return err
 	}
-	if len(resp.Kvs) == 0 {
+	if kv == nil {
 		return nil
 	}
 
-	err = json.Unmarshal(resp.Kvs[0].Value, &config.Server)
+	err = json.Unmarshal(kv.Value, &config.Server)
 	if err != nil {
-		log.Errorf(err, "load server version failed, maybe incompatible")
+		log.Error("load server version failed, maybe incompatible", err)
 		return nil
 	}
 	return nil
@@ -51,16 +50,15 @@ func loadServerVersion(ctx context.Context) error {
 func needUpgrade(ctx context.Context) bool {
 	err := loadServerVersion(ctx)
 	if err != nil {
-		log.Errorf(err, "check version failed, can not load the system config")
+		log.Error("check version failed, can not load the system config", err)
 		return false
 	}
 
 	update := !serviceUtil.VersionMatchRule(config.Server.Version,
 		fmt.Sprintf("%s+", version.Ver().Version))
 	if !update && version.Ver().Version != config.Server.Version {
-		log.Warnf(
-			"there is a higher version '%s' in cluster, now running '%s' version may be incompatible",
-			config.Server.Version, version.Ver().Version)
+		log.Warn(fmt.Sprintf("there is a higher version '%s' in cluster, now running '%s' version may be incompatible",
+			config.Server.Version, version.Ver().Version))
 	}
 
 	return update

@@ -20,23 +20,35 @@ package mongo
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 
-	"github.com/go-chassis/cari/rbac"
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
+	dmongo "github.com/go-chassis/cari/db/mongo"
+	rbacmodel "github.com/go-chassis/cari/rbac"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client"
-	"github.com/apache/servicecomb-service-center/datasource/mongo/client/model"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/dao"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/model"
+	"github.com/apache/servicecomb-service-center/datasource/mongo/sync"
 	mutil "github.com/apache/servicecomb-service-center/datasource/mongo/util"
 	"github.com/apache/servicecomb-service-center/pkg/log"
-	"github.com/apache/servicecomb-service-center/pkg/privacy"
-	"github.com/apache/servicecomb-service-center/pkg/util"
 )
 
-type AccountManager struct {
+func init() {
+	rbac.Install("mongo", NewRbacDAO)
 }
 
-func (ds *AccountManager) CreateAccount(ctx context.Context, a *rbac.Account) error {
+func NewRbacDAO(opts rbac.Options) (rbac.DAO, error) {
+	return &RbacDAO{}, nil
+}
+
+type RbacDAO struct {
+}
+
+func (ds *RbacDAO) CreateAccount(ctx context.Context, a *rbacmodel.Account) error {
 	exist, err := ds.AccountExist(ctx, a.Name)
 	if err != nil {
 		msg := fmt.Sprintf("failed to query account, account name %s", a.Name)
@@ -44,19 +56,13 @@ func (ds *AccountManager) CreateAccount(ctx context.Context, a *rbac.Account) er
 		return err
 	}
 	if exist {
-		return datasource.ErrAccountDuplicated
+		return rbac.ErrAccountDuplicated
 	}
-	a.Password, err = privacy.ScryptPassword(a.Password)
+
+	err = createAccountTxn(ctx, a)
 	if err != nil {
-		msg := fmt.Sprintf("failed to hash account pwd, account name %s", a.Name)
-		log.Error(msg, err)
-		return err
-	}
-	a.ID = util.GenerateUUID()
-	_, err = client.GetMongoClient().Insert(ctx, model.CollectionAccount, a)
-	if err != nil {
-		if client.IsDuplicateKey(err) {
-			return datasource.ErrAccountDuplicated
+		if dao.IsDuplicateKey(err) {
+			return rbac.ErrAccountDuplicated
 		}
 		return err
 	}
@@ -64,9 +70,20 @@ func (ds *AccountManager) CreateAccount(ctx context.Context, a *rbac.Account) er
 	return nil
 }
 
-func (ds *AccountManager) AccountExist(ctx context.Context, name string) (bool, error) {
+func createAccountTxn(ctx context.Context, a *rbacmodel.Account) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).InsertOne(sessionContext, a)
+		if err != nil {
+			return err
+		}
+		err = sync.DoCreateOpts(sessionContext, datasource.ResourceAccount, a)
+		return err
+	})
+}
+
+func (ds *RbacDAO) AccountExist(ctx context.Context, name string) (bool, error) {
 	filter := mutil.NewFilter(mutil.AccountName(name))
-	count, err := client.GetMongoClient().Count(ctx, model.CollectionAccount, filter)
+	count, err := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).CountDocuments(ctx, filter)
 	if err != nil {
 		return false, err
 	}
@@ -76,24 +93,19 @@ func (ds *AccountManager) AccountExist(ctx context.Context, name string) (bool, 
 	return true, nil
 }
 
-func (ds *AccountManager) GetAccount(ctx context.Context, name string) (*rbac.Account, error) {
+func (ds *RbacDAO) GetAccount(ctx context.Context, name string) (*rbacmodel.Account, error) {
 	filter := mutil.NewFilter(mutil.AccountName(name))
-	result, err := client.GetMongoClient().FindOne(ctx, model.CollectionAccount, filter)
-	if err != nil {
-		msg := fmt.Sprintf("failed to query account, account name %s", name)
-		log.Error(msg, err)
-		return nil, err
-	}
-	if err = result.Err(); err != nil {
+	result := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).FindOne(ctx, filter)
+	if err := result.Err(); err != nil {
 		if err == mongo.ErrNoDocuments {
-			return nil, datasource.ErrAccountNotExist
+			return nil, rbac.ErrAccountNotExist
 		}
 		msg := fmt.Sprintf("failed to query account, account name %s", name)
 		log.Error(msg, result.Err())
-		return nil, datasource.ErrQueryAccountFailed
+		return nil, rbac.ErrQueryAccountFailed
 	}
-	var account rbac.Account
-	err = result.Decode(&account)
+	var account rbacmodel.Account
+	err := result.Decode(&account)
 	if err != nil {
 		log.Error("failed to decode account", err)
 		return nil, err
@@ -101,16 +113,16 @@ func (ds *AccountManager) GetAccount(ctx context.Context, name string) (*rbac.Ac
 	return &account, nil
 }
 
-func (ds *AccountManager) ListAccount(ctx context.Context) ([]*rbac.Account, int64, error) {
+func (ds *RbacDAO) ListAccount(ctx context.Context) ([]*rbacmodel.Account, int64, error) {
 	filter := mutil.NewFilter()
-	cursor, err := client.GetMongoClient().Find(ctx, model.CollectionAccount, filter)
+	cursor, err := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).Find(ctx, filter)
 	if err != nil {
 		return nil, 0, err
 	}
-	var accounts []*rbac.Account
+	var accounts []*rbacmodel.Account
 	defer cursor.Close(ctx)
 	for cursor.Next(ctx) {
-		var account rbac.Account
+		var account rbacmodel.Account
 		err = cursor.Decode(&account)
 		if err != nil {
 			log.Error("failed to decode account", err)
@@ -122,38 +134,61 @@ func (ds *AccountManager) ListAccount(ctx context.Context) ([]*rbac.Account, int
 	return accounts, int64(len(accounts)), nil
 }
 
-func (ds *AccountManager) DeleteAccount(ctx context.Context, names []string) (bool, error) {
+func (ds *RbacDAO) DeleteAccount(ctx context.Context, names []string) (bool, error) {
 	if len(names) == 0 {
 		return false, nil
 	}
-	inFilter := mutil.NewFilter(mutil.In(names))
-	filter := mutil.NewFilter(mutil.AccountName(inFilter))
-	result, err := client.GetMongoClient().Delete(ctx, model.CollectionAccount, filter)
+	err := deleteAccountTxn(ctx, names, ds)
 	if err != nil {
 		return false, err
-	}
-	if result.DeletedCount == 0 {
-		return false, nil
 	}
 	return true, nil
 }
 
-func (ds *AccountManager) UpdateAccount(ctx context.Context, name string, account *rbac.Account) error {
+func deleteAccountTxn(ctx context.Context, names []string, ds *RbacDAO) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		for _, name := range names {
+			account, err := ds.GetAccount(sessionContext, name)
+			if err != nil {
+				return err
+			}
+			err = sync.DoDeleteOpts(sessionContext, datasource.ResourceAccount, account.Name, account)
+			if err != nil {
+				return err
+			}
+		}
+		inFilter := mutil.NewFilter(mutil.In(names))
+		filter := mutil.NewFilter(mutil.AccountName(inFilter))
+		_, err := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).DeleteMany(ctx, filter)
+		return err
+	})
+}
+
+func (ds *RbacDAO) UpdateAccount(ctx context.Context, name string, account *rbacmodel.Account) error {
 	filter := mutil.NewFilter(mutil.AccountName(name))
 	setFilter := mutil.NewFilter(
 		mutil.ID(account.ID),
-		mutil.Password(account.Password), mutil.Roles(account.Roles),
+		mutil.Password(account.Password),
+		mutil.Roles(account.Roles),
 		mutil.TokenExpirationTime(account.TokenExpirationTime),
 		mutil.CurrentPassword(account.CurrentPassword),
 		mutil.Status(account.Status),
+		mutil.AccountUpdateTime(strconv.FormatInt(time.Now().Unix(), 10)),
 	)
 	updateFilter := mutil.NewFilter(mutil.Set(setFilter))
-	res, err := client.GetMongoClient().Update(ctx, model.CollectionAccount, filter, updateFilter)
-	if err != nil {
+	return updateAccountTxn(ctx, filter, updateFilter, account)
+}
+
+func updateAccountTxn(ctx context.Context, filter bson.M, updateFilter bson.M, account *rbacmodel.Account) error {
+	return dmongo.GetClient().ExecTxn(ctx, func(sessionContext mongo.SessionContext) error {
+		res, err := dmongo.GetClient().GetDB().Collection(model.CollectionAccount).UpdateMany(sessionContext, filter, updateFilter)
+		if err != nil {
+			return err
+		}
+		if res.ModifiedCount == 0 {
+			return mutil.ErrNoDataToUpdate
+		}
+		err = sync.DoUpdateOpts(sessionContext, datasource.ResourceAccount, account)
 		return err
-	}
-	if res.ModifiedCount == 0 {
-		return mutil.ErrNoDataToUpdate
-	}
-	return nil
+	})
 }

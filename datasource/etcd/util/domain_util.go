@@ -19,22 +19,22 @@ package util
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
-
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/little-cui/etcdadpt"
 )
 
-func GetAllDomainRawData(ctx context.Context) ([]*sd.KeyValue, error) {
+func GetAllDomainRawData(ctx context.Context) ([]*kvstore.KeyValue, error) {
 	opts := append(FromContext(ctx),
-		client.WithStrKey(path.GenerateETCDDomainKey("")),
-		client.WithPrefix())
-	rsp, err := kv.Store().Domain().Search(ctx, opts...)
+		etcdadpt.WithStrKey(path.GenerateDomainKey("")),
+		etcdadpt.WithPrefix())
+	rsp, err := sd.Domain().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +66,7 @@ func GetAllDomain(ctx context.Context) ([]string, error) {
 }
 
 func AddDomain(ctx context.Context, domain string) (bool, error) {
-	ok, err := client.Instance().PutNoOverride(ctx,
-		client.WithStrKey(path.GenerateETCDDomainKey(domain)))
+	ok, err := etcdadpt.InsertBytes(ctx, path.GenerateDomainKey(domain), nil)
 	if err != nil {
 		return false, err
 	}
@@ -76,9 +75,9 @@ func AddDomain(ctx context.Context, domain string) (bool, error) {
 
 func DomainExist(ctx context.Context, domain string) (bool, error) {
 	opts := append(FromContext(ctx),
-		client.WithStrKey(path.GenerateETCDDomainKey(domain)),
-		client.WithCountOnly())
-	rsp, err := kv.Store().Domain().Search(ctx, opts...)
+		etcdadpt.WithStrKey(path.GenerateDomainKey(domain)),
+		etcdadpt.WithCountOnly())
+	rsp, err := sd.Domain().Search(ctx, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -86,8 +85,7 @@ func DomainExist(ctx context.Context, domain string) (bool, error) {
 }
 
 func AddProject(ctx context.Context, domain, project string) (bool, error) {
-	ok, err := client.Instance().PutNoOverride(ctx,
-		client.WithStrKey(path.GenerateETCDProjectKey(domain, project)))
+	ok, err := etcdadpt.InsertBytes(ctx, path.GenerateProjectKey(domain, project), nil)
 	if err != nil {
 		return ok, err
 	}
@@ -96,9 +94,9 @@ func AddProject(ctx context.Context, domain, project string) (bool, error) {
 
 func ProjectExist(ctx context.Context, domain, project string) (bool, error) {
 	opts := append(FromContext(ctx),
-		client.WithStrKey(path.GenerateETCDProjectKey(domain, project)),
-		client.WithCountOnly())
-	rsp, err := kv.Store().Project().Search(ctx, opts...)
+		etcdadpt.WithStrKey(path.GenerateProjectKey(domain, project)),
+		etcdadpt.WithCountOnly())
+	rsp, err := sd.Project().Search(ctx, opts...)
 	if err != nil {
 		return false, err
 	}
@@ -111,7 +109,7 @@ func NewDomainProject(ctx context.Context, domain, project string) error {
 	if !ok && err == nil {
 		ok, err = AddDomain(ctx, domain)
 		if ok {
-			log.Infof("new domain(%s)", domain)
+			log.Info(fmt.Sprintf("new domain(%s)", domain))
 		}
 	}
 	if err != nil {
@@ -121,7 +119,7 @@ func NewDomainProject(ctx context.Context, domain, project string) error {
 	if !ok && err == nil {
 		ok, err = AddProject(ctx, domain, project)
 		if ok {
-			log.Infof("new project(%s/%s)", domain, project)
+			log.Info(fmt.Sprintf("new project(%s/%s)", domain, project))
 		}
 	}
 	return err

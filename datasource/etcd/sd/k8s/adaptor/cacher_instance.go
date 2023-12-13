@@ -1,17 +1,19 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package adaptor
 
@@ -19,16 +21,15 @@ import (
 	"reflect"
 	"strconv"
 
+	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
+	"github.com/apache/servicecomb-service-center/pkg/util"
 	pb "github.com/go-chassis/cari/discovery"
 	v1 "k8s.io/api/core/v1"
-
-	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
-	"github.com/apache/servicecomb-service-center/pkg/util"
 )
 
 type InstanceCacher struct {
-	*sd.CommonCacher
+	*kvstore.CommonCacher
 }
 
 // onServiceEvent is the method to refresh service cache
@@ -50,11 +51,11 @@ func (c *InstanceCacher) onServiceEvent(evt K8sEvent) {
 	}
 }
 
-func (c *InstanceCacher) getInstances(domainProject, serviceID string) (m map[string]*sd.KeyValue) {
-	var arr []*sd.KeyValue
+func (c *InstanceCacher) getInstances(domainProject, serviceID string) (m map[string]*kvstore.KeyValue) {
+	var arr []*kvstore.KeyValue
 	key := path.GenerateInstanceKey(domainProject, serviceID, "")
 	if l := c.Cache().GetPrefix(key, &arr); l > 0 {
-		m = make(map[string]*sd.KeyValue, l)
+		m = make(map[string]*kvstore.KeyValue, l)
 		for _, kv := range arr {
 			m[util.BytesToStringWithNoCopy(kv.Key)] = kv
 		}
@@ -63,7 +64,7 @@ func (c *InstanceCacher) getInstances(domainProject, serviceID string) (m map[st
 }
 
 func (c *InstanceCacher) deleteInstances(domainProject, serviceID string) {
-	var kvs []*sd.KeyValue
+	var kvs []*kvstore.KeyValue
 	c.Cache().GetPrefix(path.GenerateInstanceKey(domainProject, serviceID, ""), &kvs)
 	for _, kv := range kvs {
 		key := util.BytesToStringWithNoCopy(kv.Key)
@@ -83,7 +84,7 @@ func (c *InstanceCacher) onEndpointsEvent(evt K8sEvent) {
 	serviceID := generateServiceID(domainProject, svc)
 
 	oldKvs := c.getInstances(domainProject, serviceID)
-	newKvs := make(map[string]*sd.KeyValue)
+	newKvs := make(map[string]*kvstore.KeyValue)
 	for _, ss := range ep.Subsets {
 		for _, ea := range ss.Addresses {
 			pod := Kubernetes().GetPodByIP(ea.IP)
@@ -142,7 +143,7 @@ func (c *InstanceCacher) onEndpointsEvent(evt K8sEvent) {
 	}
 }
 
-func NewInstanceCacher(c *sd.CommonCacher) (i *InstanceCacher) {
+func NewInstanceCacher(c *kvstore.CommonCacher) (i *InstanceCacher) {
 	i = &InstanceCacher{CommonCacher: c}
 	Kubernetes().AppendEventFunc(TypeService, i.onServiceEvent)
 	Kubernetes().AppendEventFunc(TypeEndpoint, i.onEndpointsEvent)

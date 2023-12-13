@@ -1,43 +1,46 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package aggregate
 
 import (
 	"context"
 
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/little-cui/etcdadpt"
 )
 
-// AdaptorsIndexer implements sd.Indexer.
+// AdaptorsIndexer implements kvstore.Indexer.
 // AdaptorsIndexer is an aggregator of multi Indexers, and it aggregates all the
 // Indexers' data as it's result.
 type AdaptorsIndexer struct {
-	Adaptors []sd.Adaptor
+	Adaptors []state.State
 }
 
-// Search implements sd.Indexer#Search.
+// Search implements kvstore.Indexer#Search.
 // AdaptorsIndexer ignores the errors during search to ensure availability, so
 // it always searches successfully, no matter how many Adaptors are abnormal.
 // But at the cost of that, AdaptorsIndexer doesn't guarantee the correctness
 // of the search results.
-func (i *AdaptorsIndexer) Search(ctx context.Context, opts ...client.PluginOpOption) (*sd.Response, error) {
+func (i *AdaptorsIndexer) Search(ctx context.Context, opts ...etcdadpt.OpOption) (*kvstore.Response, error) {
 	var (
-		response sd.Response
+		response kvstore.Response
 		exists   = make(map[string]struct{})
 	)
 	for _, a := range i.Adaptors {
@@ -57,7 +60,7 @@ func (i *AdaptorsIndexer) Search(ctx context.Context, opts ...client.PluginOpOpt
 	return &response, nil
 }
 
-// Creditable implements sd.Indexer#Creditable.
+// Creditable implements kvstore.Indexer#Creditable.
 // AdaptorsIndexer's search result's are not creditable as it ignores the
 // errors. In other words, AdaptorsIndexer makes the best efforts to search
 // data, but it does not ensure the correctness.
@@ -65,25 +68,25 @@ func (i *AdaptorsIndexer) Creditable() bool {
 	return false
 }
 
-func NewAdaptorsIndexer(as []sd.Adaptor) *AdaptorsIndexer {
+func NewAdaptorsIndexer(as []state.State) *AdaptorsIndexer {
 	return &AdaptorsIndexer{Adaptors: as}
 }
 
-// AggregatorIndexer implements sd.Indexer.
+// AggregatorIndexer implements kvstore.Indexer.
 // AggregatorIndexer consists of multi Indexers and it decides which Indexer to
 // use based on it's mechanism.
 type AggregatorIndexer struct {
 	// CacheIndexer searches data from all the adaptors's cache.
-	*sd.CacheIndexer
+	*kvstore.CacheIndexer
 	// AdaptorsIndexer searches data from all the adaptors.
-	AdaptorsIndexer sd.Indexer
+	AdaptorsIndexer kvstore.Indexer
 	// LocalIndexer data from local adaptor.
-	LocalIndexer sd.Indexer
+	LocalIndexer kvstore.Indexer
 }
 
-// Search implements sd.Indexer#Search.
-func (i *AggregatorIndexer) Search(ctx context.Context, opts ...client.PluginOpOption) (resp *sd.Response, err error) {
-	op := client.OpGet(opts...)
+// Search implements kvstore.Indexer#Search.
+func (i *AggregatorIndexer) Search(ctx context.Context, opts ...etcdadpt.OpOption) (resp *kvstore.Response, err error) {
+	op := etcdadpt.OpGet(opts...)
 
 	indexer := i.LocalIndexer
 	if op.Global {
@@ -107,7 +110,7 @@ func (i *AggregatorIndexer) Search(ctx context.Context, opts ...client.PluginOpO
 	return indexer.Search(ctx, opts...)
 }
 
-// Creditable implements sd.Indexer#Creditable.
+// Creditable implements kvstore.Indexer#Creditable.
 func (i *AggregatorIndexer) Creditable() bool {
 	return i.AdaptorsIndexer.Creditable() &&
 		i.LocalIndexer.Creditable() &&
@@ -117,7 +120,7 @@ func (i *AggregatorIndexer) Creditable() bool {
 func NewAggregatorIndexer(as *Aggregator) *AggregatorIndexer {
 	indexer := NewAdaptorsIndexer(as.Adaptors)
 	ai := &AggregatorIndexer{
-		CacheIndexer:    sd.NewCacheIndexer(as.Cache()),
+		CacheIndexer:    kvstore.NewCacheIndexer(as.Cache()),
 		AdaptorsIndexer: indexer,
 		LocalIndexer:    indexer,
 	}

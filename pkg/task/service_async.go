@@ -20,13 +20,16 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
+	"github.com/apache/servicecomb-service-center/pkg/goutil"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/go-chassis/foundation/gopool"
+	"github.com/go-chassis/foundation/timeutil"
 )
 
 const (
@@ -115,7 +118,7 @@ func (lat *AsyncTaskService) daemon(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Debugf("daemon thread exited for AsyncTaskService stopped")
+			log.Debug("daemon thread exited for AsyncTaskService stopped")
 			return
 		case <-timer.C:
 			lat.lock.RLock()
@@ -132,7 +135,7 @@ func (lat *AsyncTaskService) daemon(ctx context.Context) {
 
 			timer.Reset(executeInterval)
 		case <-ticker.C:
-			util.ResetTimer(timer, executeInterval)
+			timeutil.ResetTimer(timer, executeInterval)
 
 			lat.lock.RLock()
 			l := len(lat.executors)
@@ -164,7 +167,7 @@ func (lat *AsyncTaskService) daemon(ctx context.Context) {
 			}
 			lat.lock.Unlock()
 
-			log.Debugf("daemon thread completed, %d executor(s) removed", len(removes))
+			log.Debug(fmt.Sprintf("daemon thread completed, %d executor(s) removed", len(removes)))
 		}
 	}
 }
@@ -213,7 +216,7 @@ func (lat *AsyncTaskService) renew() {
 
 func NewTaskService() Service {
 	lat := &AsyncTaskService{
-		goroutine: gopool.New(context.Background()),
+		goroutine: goutil.New(gopool.Configure()),
 		ready:     make(chan struct{}),
 		isClose:   true,
 	}

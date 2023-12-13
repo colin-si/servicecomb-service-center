@@ -19,41 +19,31 @@ package etcd
 
 import (
 	"context"
-	"strconv"
+	"fmt"
 	"strings"
-	"time"
 
 	pb "github.com/go-chassis/cari/discovery"
 	"github.com/go-chassis/cari/pkg/errsvc"
+	"github.com/go-chassis/foundation/gopool"
+	"github.com/little-cui/etcdadpt"
 
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/sync"
 	serviceUtil "github.com/apache/servicecomb-service-center/datasource/etcd/util"
-	errorsEx "github.com/apache/servicecomb-service-center/pkg/errors"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
-	"github.com/apache/servicecomb-service-center/server/core"
-	"github.com/apache/servicecomb-service-center/server/plugin/uuid"
 )
-
-type ServiceDetailOpt struct {
-	domainProject string
-	service       *pb.MicroService
-	countOnly     bool
-	options       []string
-}
 
 // schema
 func getSchemaSummary(ctx context.Context, domainProject string, serviceID string, schemaID string) (string, error) {
 	key := path.GenerateServiceSchemaSummaryKey(domainProject, serviceID, schemaID)
-	resp, err := kv.Store().SchemaSummary().Search(ctx,
-		client.WithStrKey(key),
+	resp, err := sd.SchemaSummary().Search(ctx,
+		etcdadpt.WithStrKey(key),
 	)
 	if err != nil {
-		log.Errorf(err, "get schema[%s/%s] summary failed", serviceID, schemaID)
+		log.Error(fmt.Sprintf("get schema[%s/%s] summary failed", serviceID, schemaID), err)
 		return "", err
 	}
 	if len(resp.Kvs) == 0 {
@@ -64,11 +54,11 @@ func getSchemaSummary(ctx context.Context, domainProject string, serviceID strin
 
 func getSchemasFromDatabase(ctx context.Context, domainProject string, serviceID string) ([]*pb.Schema, error) {
 	key := path.GenerateServiceSchemaKey(domainProject, serviceID, "")
-	resp, err := kv.Store().Schema().Search(ctx,
-		client.WithPrefix(),
-		client.WithStrKey(key))
+	resp, err := sd.Schema().Search(ctx,
+		etcdadpt.WithPrefix(),
+		etcdadpt.WithStrKey(key))
 	if err != nil {
-		log.Errorf(err, "get service[%s]'s schema failed", serviceID)
+		log.Error(fmt.Sprintf("get service[%s]'s schema failed", serviceID), err)
 		return nil, err
 	}
 	schemas := make([]*pb.Schema, 0, len(resp.Kvs))
@@ -87,8 +77,8 @@ func getSchemasFromDatabase(ctx context.Context, domainProject string, serviceID
 }
 
 func checkSchemaInfoExist(ctx context.Context, key string) (bool, error) {
-	opts := append(serviceUtil.FromContext(ctx), client.WithStrKey(key), client.WithCountOnly())
-	resp, errDo := kv.Store().Schema().Search(ctx, opts...)
+	opts := append(serviceUtil.FromContext(ctx), etcdadpt.WithStrKey(key), etcdadpt.WithCountOnly())
+	resp, errDo := sd.Schema().Search(ctx, opts...)
 	if errDo != nil {
 		return false, errDo
 	}
@@ -98,105 +88,79 @@ func checkSchemaInfoExist(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
-func isExistSchemaSummary(ctx context.Context, domainProject, serviceID, schemaID string) (bool, error) {
-	key := path.GenerateServiceSchemaSummaryKey(domainProject, serviceID, schemaID)
-	resp, err := kv.Store().SchemaSummary().Search(ctx, client.WithStrKey(key), client.WithCountOnly())
+func putSchema(ctx context.Context, domainProject string, serviceID string, schema *pb.Schema) ([]etcdadpt.OpOptions, error) {
+	opts := make([]etcdadpt.OpOptions, 0)
+	key := path.GenerateServiceSchemaKey(domainProject, serviceID, schema.SchemaId)
+	onPutOpt := etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithStrValue(schema.Schema))
+	opts = append(opts, onPutOpt)
+	syncOpts, err := sync.GenUpdateOpts(ctx, datasource.ResourceKV, schema.Schema, sync.WithOpts(map[string]string{"key": key}))
 	if err != nil {
-		return true, err
+		log.Error("fail to create update opts", err)
+		return opts, err
 	}
-	if resp.Count == 0 {
-		return false, nil
+	opts = append(opts, syncOpts...)
+	keySummary := path.GenerateServiceSchemaSummaryKey(domainProject, serviceID, schema.SchemaId)
+	onPutOpt = etcdadpt.OpPut(etcdadpt.WithStrKey(keySummary), etcdadpt.WithStrValue(schema.Summary))
+	opts = append(opts, onPutOpt)
+	syncOpts, err = sync.GenUpdateOpts(ctx, datasource.ResourceKV, schema.Summary, sync.WithOpts(map[string]string{"key": keySummary}))
+	if err != nil {
+		log.Error("fail to create update opts", err)
+		return opts, err
 	}
-	return true, nil
+	opts = append(opts, syncOpts...)
+	return opts, nil
 }
 
-func schemaWithDatabaseOpera(invoke client.Operation, domainProject string, serviceID string, schema *pb.Schema) []client.PluginOp {
-	pluginOps := make([]client.PluginOp, 0)
+func deleteSchema(ctx context.Context, domainProject string, serviceID string, schema *pb.Schema) ([]etcdadpt.OpOptions, error) {
+	opts := make([]etcdadpt.OpOptions, 0)
 	key := path.GenerateServiceSchemaKey(domainProject, serviceID, schema.SchemaId)
-	opt := invoke(client.WithStrKey(key), client.WithStrValue(schema.Schema))
-	pluginOps = append(pluginOps, opt)
+	onDelOpt := etcdadpt.OpDel(etcdadpt.WithStrKey(key), etcdadpt.WithStrValue(schema.Schema))
+	opts = append(opts, onDelOpt)
+	syncOpts, err := sync.GenDeleteOpts(ctx, datasource.ResourceKV, key, schema.Schema, sync.WithOpts(map[string]string{"key": key}))
+	if err != nil {
+		log.Error("fail to create update opts", err)
+		return opts, err
+	}
+	opts = append(opts, syncOpts...)
 	keySummary := path.GenerateServiceSchemaSummaryKey(domainProject, serviceID, schema.SchemaId)
-	opt = invoke(client.WithStrKey(keySummary), client.WithStrValue(schema.Summary))
-	pluginOps = append(pluginOps, opt)
-	return pluginOps
+	onDelOpt = etcdadpt.OpDel(etcdadpt.WithStrKey(keySummary), etcdadpt.WithStrValue(schema.Summary))
+	opts = append(opts, onDelOpt)
+	syncOpts, err = sync.GenDeleteOpts(ctx, datasource.ResourceKV, keySummary, schema.Summary, sync.WithOpts(map[string]string{"key": keySummary}))
+	if err != nil {
+		log.Error("fail to create update opts", err)
+		return opts, err
+	}
+	opts = append(opts, syncOpts...)
+	return opts, nil
 }
 
 func isExistSchemaID(service *pb.MicroService, schemas []*pb.Schema) bool {
 	serviceSchemaIds := service.Schemas
 	for _, schema := range schemas {
-		if !containsValueInSlice(serviceSchemaIds, schema.SchemaId) {
-			log.Errorf(nil, "schema[%s/%s] does not exist schemaID", service.ServiceId, schema.SchemaId)
+		if !util.SliceHave(serviceSchemaIds, schema.SchemaId) {
+			log.Error(fmt.Sprintf("schema[%s/%s] does not exist schemaID", service.ServiceId, schema.SchemaId), nil)
 			return false
 		}
 	}
 	return true
 }
 
-func containsValueInSlice(in []string, value string) bool {
-	if in == nil || len(value) == 0 {
-		return false
-	}
-	for _, i := range in {
-		if i == value {
-			return true
-		}
-	}
-	return false
-}
-
-func commitSchemaInfo(domainProject string, serviceID string, schema *pb.Schema) []client.PluginOp {
+func commitSchemaInfo(ctx context.Context, domainProject string, serviceID string, schema *pb.Schema) ([]etcdadpt.OpOptions, error) {
 	if len(schema.Summary) != 0 {
-		return schemaWithDatabaseOpera(client.OpPut, domainProject, serviceID, schema)
+		opts, err := putSchema(ctx, domainProject, serviceID, schema)
+		return opts, err
 	}
+	opts := make([]etcdadpt.OpOptions, 0)
 	key := path.GenerateServiceSchemaKey(domainProject, serviceID, schema.SchemaId)
-	opt := client.OpPut(client.WithStrKey(key), client.WithStrValue(schema.Schema))
-	return []client.PluginOp{opt}
-}
-
-// instance util
-func preProcessRegisterInstance(ctx context.Context, instance *pb.MicroServiceInstance) *errsvc.Error {
-	if len(instance.Status) == 0 {
-		instance.Status = pb.MSI_UP
-	}
-
-	if len(instance.InstanceId) == 0 {
-		instance.InstanceId = uuid.Generator().GetInstanceID(ctx)
-	}
-
-	instance.Timestamp = strconv.FormatInt(time.Now().Unix(), 10)
-	instance.ModTimestamp = instance.Timestamp
-
-	// 这里应该根据租约计时
-	renewalInterval := core.RegistryDefaultLeaseRenewalinterval
-	retryTimes := core.RegistryDefaultLeaseRetrytimes
-	if instance.HealthCheck == nil {
-		instance.HealthCheck = &pb.HealthCheck{
-			Mode:     pb.CHECK_BY_HEARTBEAT,
-			Interval: renewalInterval,
-			Times:    retryTimes,
-		}
-	} else {
-		// Health check对象仅用于呈现服务健康检查逻辑，如果CHECK_BY_PLATFORM类型，表明由sidecar代发心跳，实例120s超时
-		switch instance.HealthCheck.Mode {
-		case pb.CHECK_BY_HEARTBEAT:
-			d := instance.HealthCheck.Interval * (instance.HealthCheck.Times + 1)
-			if d <= 0 {
-				return pb.NewError(pb.ErrInvalidParams, "Invalid 'healthCheck' settings in request body.")
-			}
-		case pb.CHECK_BY_PLATFORM:
-			// 默认120s
-			instance.HealthCheck.Interval = renewalInterval
-			instance.HealthCheck.Times = retryTimes
-		}
-	}
-
-	domainProject := util.ParseDomainProject(ctx)
-	microservice, err := serviceUtil.GetService(ctx, domainProject, instance.ServiceId)
+	opt := etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithStrValue(schema.Schema))
+	opts = append(opts, opt)
+	syncOpts, err := sync.GenUpdateOpts(ctx, datasource.ResourceKV, schema.Schema, sync.WithOpts(map[string]string{"key": key}))
 	if err != nil {
-		return pb.NewError(pb.ErrServiceNotExists, "Invalid 'serviceID' in request body.")
+		log.Error("fail to create update opts", err)
+		return opts, err
 	}
-	instance.Version = microservice.Version
-	return nil
+	opts = append(opts, syncOpts...)
+	return opts, nil
 }
 
 func getHeartbeatFunc(ctx context.Context, domainProject string, instancesHbRst chan<- *pb.InstanceHbRst, element *pb.HeartbeatSetElement) func(context.Context) {
@@ -209,7 +173,7 @@ func getHeartbeatFunc(ctx context.Context, domainProject string, instancesHbRst 
 		_, _, err := serviceUtil.HeartbeatUtil(ctx, domainProject, element.ServiceId, element.InstanceId)
 		if err != nil {
 			hbRst.ErrMessage = err.Error()
-			log.Errorf(err, "heartbeat set failed, %s/%s", element.ServiceId, element.InstanceId)
+			log.Error(fmt.Sprintf("heartbeat set failed, %s/%s", element.ServiceId, element.InstanceId), err)
 		}
 		instancesHbRst <- hbRst
 	}
@@ -224,144 +188,14 @@ func revokeInstance(ctx context.Context, domainProject string, serviceID string,
 		return pb.NewError(pb.ErrInstanceNotExists, "Instance's leaseId not exist.")
 	}
 
-	err = client.Instance().LeaseRevoke(ctx, leaseID)
+	err = etcdadpt.Instance().LeaseRevoke(ctx, leaseID)
 	if err != nil {
-		if _, ok := err.(errorsEx.InternalError); !ok {
+		if err == etcdadpt.ErrLeaseNotFound {
 			return pb.NewError(pb.ErrInstanceNotExists, err.Error())
 		}
 		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 	return nil
-}
-
-// governServiceCtrl util
-func getServiceAllVersions(ctx context.Context, serviceKey *pb.MicroServiceKey) ([]string, error) {
-	var versions []string
-
-	copyKey := *serviceKey
-	copyKey.Version = ""
-	key := path.GenerateServiceIndexKey(&copyKey)
-
-	opts := append(serviceUtil.FromContext(ctx),
-		client.WithStrKey(key),
-		client.WithPrefix())
-
-	resp, err := kv.Store().ServiceIndex().Search(ctx, opts...)
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil || len(resp.Kvs) == 0 {
-		return versions, nil
-	}
-	for _, keyValue := range resp.Kvs {
-		key := path.GetInfoFromSvcIndexKV(keyValue.Key)
-		versions = append(versions, key.Version)
-	}
-	return versions, nil
-}
-
-func getServiceDetailUtil(ctx context.Context, serviceDetailOpt ServiceDetailOpt) (*pb.ServiceDetail, error) {
-	serviceID := serviceDetailOpt.service.ServiceId
-	options := serviceDetailOpt.options
-	domainProject := serviceDetailOpt.domainProject
-	serviceDetail := new(pb.ServiceDetail)
-	if serviceDetailOpt.countOnly {
-		serviceDetail.Statics = new(pb.Statistics)
-	}
-
-	for _, opt := range options {
-		expr := opt
-		switch expr {
-		case "tags":
-			tags, err := serviceUtil.GetTagsUtils(ctx, domainProject, serviceID)
-			if err != nil {
-				log.Errorf(err, "get service[%s]'s all tags failed", serviceID)
-				return nil, err
-			}
-			serviceDetail.Tags = tags
-		case "rules":
-			rules, err := serviceUtil.GetRulesUtil(ctx, domainProject, serviceID)
-			if err != nil {
-				log.Errorf(err, "get service[%s]'s all rules failed", serviceID)
-				return nil, err
-			}
-			for _, rule := range rules {
-				rule.Timestamp = rule.ModTimestamp
-			}
-			serviceDetail.Rules = rules
-		case "instances":
-			if serviceDetailOpt.countOnly {
-				instanceCount, err := serviceUtil.GetInstanceCountOfOneService(ctx, domainProject, serviceID)
-				if err != nil {
-					log.Errorf(err, "get number of service[%s]'s instances failed", serviceID)
-					return nil, err
-				}
-				serviceDetail.Statics.Instances = &pb.StInstance{
-					Count: instanceCount}
-				continue
-			}
-			instances, err := serviceUtil.GetAllInstancesOfOneService(ctx, domainProject, serviceID)
-			if err != nil {
-				log.Errorf(err, "get service[%s]'s all instances failed", serviceID)
-				return nil, err
-			}
-			serviceDetail.Instances = instances
-		case "schemas":
-			schemas, err := getSchemaInfoUtil(ctx, domainProject, serviceID)
-			if err != nil {
-				log.Errorf(err, "get service[%s]'s all schemas failed", serviceID)
-				return nil, err
-			}
-			serviceDetail.SchemaInfos = schemas
-		case "dependencies":
-			service := serviceDetailOpt.service
-			dr := serviceUtil.NewDependencyRelation(ctx, domainProject, service, service)
-			consumers, err := dr.GetDependencyConsumers(
-				serviceUtil.WithoutSelfDependency(),
-				serviceUtil.WithSameDomainProject())
-			if err != nil {
-				log.Errorf(err, "get service[%s][%s/%s/%s/%s]'s all consumers failed",
-					service.ServiceId, service.Environment, service.AppId, service.ServiceName, service.Version)
-				return nil, err
-			}
-			providers, err := dr.GetDependencyProviders(
-				serviceUtil.WithoutSelfDependency(),
-				serviceUtil.WithSameDomainProject())
-			if err != nil {
-				log.Errorf(err, "get service[%s][%s/%s/%s/%s]'s all providers failed",
-					service.ServiceId, service.Environment, service.AppId, service.ServiceName, service.Version)
-				return nil, err
-			}
-
-			serviceDetail.Consumers = consumers
-			serviceDetail.Providers = providers
-		case "":
-			continue
-		default:
-			log.Errorf(nil, "request option[%s] is invalid", opt)
-		}
-	}
-	return serviceDetail, nil
-}
-
-func getSchemaInfoUtil(ctx context.Context, domainProject string, serviceID string) ([]*pb.Schema, error) {
-	key := path.GenerateServiceSchemaKey(domainProject, serviceID, "")
-
-	resp, err := kv.Store().Schema().Search(ctx,
-		client.WithStrKey(key),
-		client.WithPrefix())
-	if err != nil {
-		log.Errorf(err, "get service[%s]'s schemas failed", serviceID)
-		return make([]*pb.Schema, 0), err
-	}
-	schemas := make([]*pb.Schema, 0, len(resp.Kvs))
-	for _, kv := range resp.Kvs {
-		schemaInfo := &pb.Schema{}
-		schemaInfo.Schema = util.BytesToStringWithNoCopy(kv.Value.([]byte))
-		schemaInfo.SchemaId = util.BytesToStringWithNoCopy(kv.Key[len(key):])
-		schemas = append(schemas, schemaInfo)
-	}
-	return schemas, nil
 }
 
 func statistics(ctx context.Context, withShared bool) (*pb.Statistics, error) {
@@ -376,9 +210,9 @@ func statistics(ctx context.Context, withShared bool) (*pb.Statistics, error) {
 	// services
 	key := path.GetServiceIndexRootKey(domainProject) + "/"
 	svcOpts := append(opts,
-		client.WithStrKey(key),
-		client.WithPrefix())
-	respSvc, err := kv.Store().ServiceIndex().Search(ctx, svcOpts...)
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithPrefix())
+	respSvc, err := sd.ServiceIndex().Search(ctx, svcOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -401,10 +235,10 @@ func statistics(ctx context.Context, withShared bool) (*pb.Statistics, error) {
 	// instance
 	key = path.GetInstanceRootKey(domainProject) + "/"
 	instOpts := append(opts,
-		client.WithStrKey(key),
-		client.WithPrefix(),
-		client.WithKeyOnly())
-	respIns, err := kv.Store().Instance().Search(ctx, instOpts...)
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithPrefix(),
+		etcdadpt.WithKeyOnly())
+	respIns, err := sd.Instance().Search(ctx, instOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -428,17 +262,17 @@ func statistics(ctx context.Context, withShared bool) (*pb.Statistics, error) {
 func getInstanceCountByDomain(ctx context.Context, svcIDToNonVerKey map[string]string, resp chan datasource.GetInstanceCountByDomainResponse) {
 	domainID := util.ParseDomain(ctx)
 	key := path.GetInstanceRootKey(domainID) + "/"
-	instOpts := append([]client.PluginOpOption{},
-		client.WithStrKey(key),
-		client.WithPrefix(),
-		client.WithKeyOnly())
-	respIns, err := kv.Store().Instance().Search(ctx, instOpts...)
+	instOpts := append(serviceUtil.FromContext(ctx),
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithPrefix(),
+		etcdadpt.WithKeyOnly())
+	respIns, err := sd.Instance().Search(ctx, instOpts...)
 	ret := datasource.GetInstanceCountByDomainResponse{
 		Err: err,
 	}
 
 	if err != nil {
-		log.Errorf(err, "get number of instances by domain[%s]", domainID)
+		log.Error(fmt.Sprintf("get number of instances by domain[%s]", domainID), err)
 	} else {
 		for _, keyValue := range respIns.Kvs {
 			serviceID, _, _ := path.GetInfoFromInstKV(keyValue.Key)

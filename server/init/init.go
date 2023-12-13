@@ -20,5 +20,5 @@ package init
 import "github.com/apache/servicecomb-service-center/server/core"
 
 func init() {
-	core.Initialize()
+	core.Init()
 }

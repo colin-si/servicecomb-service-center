@@ -22,9 +22,8 @@ import (
 )
 
 const (
-	FamilyName       = "service_center"
-	familyNamePrefix = FamilyName + "_"
-	bufferSize       = 1024
+	FamilyName = "service_center"
+	bufferSize = 1024
 )
 
 var (
@@ -33,7 +32,7 @@ var (
 	SysMetrics util.ConcurrentMap
 	// Gatherer is the reader of sc metrics, but can not get not real time metrics
 	// Call the prometheus.Gather() if get the real time metrics
-	Gatherer *Gather
+	Gatherer = EmptyGather
 )
 
 func Init(opts Options) error {

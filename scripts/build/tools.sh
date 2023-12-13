@@ -20,12 +20,19 @@
 set -e
 
 # GO flags
-export GOPROXY=${GOPROXY:-"https://goproxy.io"}
 export GOOS=${GOOS:-"linux"}
 export GOARCH=${GOARCH:-"amd64"}
 export CGO_ENABLED=${CGO_ENABLED:-0} # prevent to compile cgo file
 export GO_EXTLINK_ENABLED=${GO_EXTLINK_ENABLED:-0} # do not use host linker
 export GO_LDFLAGS=${GO_LDFLAGS:-" -s -w"}
+if [[ $GOOS == "linux" ]]; then
+  if [[ $CGO_ENABLED == 1 ]]; then
+    export CGO_CFLAGS="${CGO_CFLAGS} -fstack-protector-strong -D_FORTIFY_SOURCE=2 -O2"
+  fi
+  if [[ $GO_EXTLINK_ENABLED == 1 ]]; then
+    export GO_LDFLAGS="${GO_LDFLAGS} -linkmode=external -extldflags \"-Wl,-z,now\""
+  fi
+fi
 # Inputs
 export RELEASE=${RELEASE:-"0.0.1"}
 export PACKAGE_PREFIX=${PACKAGE_PREFIX:-"apache-servicecomb-service-center"}
@@ -43,7 +50,7 @@ install_bower() {
     set +e
     local NPM=$(which npm)
     set -e
-    if [ "$?" == "1" ]; then
+    if [ ${NPM}"x" == "x" ]; then
         curl -sL https://deb.nodesource.com/setup_8.x | bash -
         sudo apt-get install -y nodejs
     fi
@@ -51,17 +58,18 @@ install_bower() {
     set +e
     local BOWER=$(which bower)
     set -e
-    if [ "$?" == "1" ]; then
+    if [ ${BOWER}"x" == "x" ]; then
         npm install -g bower
     fi
 }
 
 frontend_deps() {
-    install_bower
-
-    ## Download the frontend dependencies using bower
     cd ${script_path}/../../frontend/app
-    bower install --allow-root
+    if [ ! -d "bower_components" ]; then
+        ## Download the frontend dependencies using bower
+        install_bower
+        bower install --allow-root
+    fi
     cd -
 }
 
@@ -73,7 +81,7 @@ build_frontend() {
     if [ "$GOOS" == "windows" ]; then
         BINARY_NAME=${BINARY_NAME}.exe
     fi
-    go build --ldflags "${GO_LDFLAGS}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/frontend
+    go build ${GO_BUILDMODE} --ldflags "${GO_LDFLAGS}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/frontend
 }
 
 build_service_center() {
@@ -88,14 +96,17 @@ build_service_center() {
 
     ## Build the Service-Center releases
     export GIT_COMMIT=$(git log  --pretty=format:'%h' -n 1)
-    export BUILD_NUMBER=$RELEASE
+    export BUILD_NUMBER=${RELEASE}
+    if [ "${BUILD_NUMBER}" == "latest" ]; then
+        BUILD_NUMBER="0.0.1"
+    fi
     local ldflags="${GO_LDFLAGS} -X 'github.com/apache/servicecomb-service-center/version.BuildTag=$(date +%Y%m%d%H%M%S).$BUILD_NUMBER.$GIT_COMMIT'"
     ldflags="${ldflags} -X 'github.com/apache/servicecomb-service-center/version.VERSION=$BUILD_NUMBER'"
     local BINARY_NAME=$app/service-center
     if [ "$GOOS" == "windows" ]; then
         BINARY_NAME=${BINARY_NAME}.exe
     fi
-    go build --ldflags "${ldflags}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/cmd/scserver
+    go build ${GO_BUILDMODE} --ldflags "${ldflags}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/cmd/scserver
 }
 
 build_scctl() {
@@ -110,22 +121,7 @@ build_scctl() {
     if [ "$GOOS" == "windows" ]; then
         BINARY_NAME=${BINARY_NAME}.exe
     fi
-    go build --ldflags "${ldflags}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/cmd/scctl
-}
-
-build_syncer() {
-    local app=$PACKAGE_PREFIX-$RELEASE-$GOOS-$GOARCH
-    ## Build the syncer releases
-    export GIT_COMMIT=$(git log  --pretty=format:'%h' -n 1)
-    export BUILD_NUMBER=$RELEASE
-    local ldflags="${GO_LDFLAGS} -X 'github.com/apache/servicecomb-service-center/syncer/version.BUILD_TAG=$(date +%Y%m%d%H%M%S).$BUILD_NUMBER.$GIT_COMMIT'"
-    ldflags="${ldflags} -X 'github.com/apache/servicecomb-service-center/syncer/version.VERSION=$BUILD_NUMBER'"
-
-    local BINARY_NAME=$app/syncer
-    if [ "$GOOS" == "windows" ]; then
-        BINARY_NAME=${BINARY_NAME}.exe
-    fi
-    go build --ldflags "${ldflags}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/cmd/syncer
+    go build ${GO_BUILDMODE} --ldflags "${ldflags}" -o $BINARY_NAME github.com/apache/servicecomb-service-center/cmd/scctl
 }
 
 ## Prepare the Configuration and Make package
@@ -133,13 +129,6 @@ package() {
     local app=$PACKAGE_PREFIX-$RELEASE-$GOOS-$GOARCH
 
     cp -r ${root_path}/etc/conf $app/
-    cat <<EOF >> $app/conf/app.yaml
-SERVER_HOST: 0.0.0.0
-REGISTRY_KIND: embedded_etcd
-REGISTRY_ETCD_CLUSTER_NAME: sc-0
-REGISTRY_ETCD_CLUSTER_MANAGER_ENDPOINTS: http://127.0.0.1:2380
-REGISTRY_ETCD_CLUSTER_ENDPOINTS: sc-0=http://127.0.0.1:2380
-EOF
 
     ## Copy the Service-Center Releases
     cp -r ${root_path}/scripts/release/LICENSE $app/
@@ -165,7 +154,6 @@ build() {
     if [ "${BUILD}" == "ALL" ]; then
       # tools
       build_scctl
-      build_syncer
       # sc frontend
       build_frontend
     fi
@@ -186,15 +174,13 @@ docker_builder_pattern() {
 
     docker rmi $builder_name
 
-    set -e
-
     cd $dockerfile_dir
-    cp -pf Dockerfile.build Dockerfile
-    sed -i "s|{{RELEASE}}|${RELEASE}|g" Dockerfile
-    sed -i "s|{{BUILD}}|${BUILD}|g" Dockerfile
-    docker build -t $builder_name .
+    docker build --no-cache --build-arg RELEASE=${RELEASE} --build-arg BUILD=${BUILD} -t $builder_name .
     docker create --name builder $builder_name
     docker cp builder:$builder_path/$app $output
     docker rm -f builder
+    docker system prune -f
+
+    set -e
     cd -
 }

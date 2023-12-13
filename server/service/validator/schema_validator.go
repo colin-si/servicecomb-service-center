@@ -21,7 +21,8 @@ import (
 	"regexp"
 
 	"github.com/apache/servicecomb-service-center/pkg/validate"
-	"github.com/apache/servicecomb-service-center/server/plugin/quota"
+	quotasvc "github.com/apache/servicecomb-service-center/server/service/quota"
+	pb "github.com/go-chassis/cari/discovery"
 )
 
 var (
@@ -44,13 +45,15 @@ func GetSchemaReqValidator() *validate.Validator {
 
 func ModifySchemasReqValidator() *validate.Validator {
 	return modifySchemasReqValidator.Init(func(v *validate.Validator) {
+		max := int(quotasvc.SchemaQuota())
+
 		var subSchemaValidator validate.Validator
 		subSchemaValidator.AddRule("SchemaId", GetSchemaReqValidator().GetRule("SchemaId"))
 		subSchemaValidator.AddRule("Summary", &validate.Rule{Min: 1, Max: 128, Regexp: schemaSummaryRegex})
 		subSchemaValidator.AddRule("Schema", &validate.Rule{Min: 1})
 
 		v.AddRule("ServiceId", GetServiceReqValidator().GetRule("ServiceId"))
-		v.AddRule("Schemas", &validate.Rule{Min: 1, Max: quota.DefaultSchemaQuota})
+		v.AddRule("Schemas", &validate.Rule{Min: 1, Max: max})
 		v.AddSub("Schemas", &subSchemaValidator)
 	})
 }
@@ -62,4 +65,40 @@ func ModifySchemaReqValidator() *validate.Validator {
 		// forward compatibility: allow empty
 		v.AddRule("Summary", &validate.Rule{Max: 128, Regexp: schemaSummaryRegex})
 	})
+}
+
+func ValidateGetSchema(request *pb.GetSchemaRequest) error {
+	err := baseCheck(request)
+	if err != nil {
+		return err
+	}
+	return GetSchemaReqValidator().Validate(request)
+}
+func ValidateListSchema(request *pb.GetAllSchemaRequest) error {
+	err := baseCheck(request)
+	if err != nil {
+		return err
+	}
+	return GetSchemaReqValidator().Validate(request)
+}
+func ValidatePutSchema(request *pb.ModifySchemaRequest) error {
+	err := baseCheck(request)
+	if err != nil {
+		return err
+	}
+	return ModifySchemaReqValidator().Validate(request)
+}
+func ValidatePutSchemas(request *pb.ModifySchemasRequest) error {
+	err := baseCheck(request)
+	if err != nil {
+		return err
+	}
+	return ModifySchemasReqValidator().Validate(request)
+}
+func ValidateDeleteSchema(request *pb.DeleteSchemaRequest) error {
+	err := baseCheck(request)
+	if err != nil {
+		return err
+	}
+	return GetSchemaReqValidator().Validate(request)
 }

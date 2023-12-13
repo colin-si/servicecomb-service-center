@@ -24,11 +24,10 @@ cd /opt/service-center
 export SERVER_HOST="$(hostname)"
 export LOG_FILE=${LOG_FILE:-''}
 export LOG_LEVEL=${LOG_LEVEL:-'DEBUG'}
+export gov_kie_type=kie
+export gov_kie_endpoint=http://kie:30110
 if [ -z "${BACKEND_ADDRESS}" ]; then
   export REGISTRY_KIND=${REGISTRY_KIND:-'embedded_etcd'}
-  export REGISTRY_ETCD_CLUSTER_NAME=${REGISTRY_ETCD_CLUSTER_NAME:-'sc-0'}
-  export REGISTRY_ETCD_CLUSTER_MANAGER_ENDPOINTS=${REGISTRY_ETCD_CLUSTER_MANAGER_ENDPOINTS:-'http://127.0.0.1:2380'}
-  export REGISTRY_ETCD_CLUSTER_ENDPOINTS=${REGISTRY_ETCD_CLUSTER_ENDPOINTS:-'sc-0=http://127.0.0.1:2380'}
 else
   export REGISTRY_KIND=${REGISTRY_KIND:-'etcd'}
   export REGISTRY_ETCD_CLUSTER_ENDPOINTS=${BACKEND_ADDRESS}

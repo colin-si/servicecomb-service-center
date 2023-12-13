@@ -24,17 +24,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/servicecomb-service-center/datasource"
-	discosvc "github.com/apache/servicecomb-service-center/server/service/disco"
-
 	pb "github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/cari/pkg/errsvc"
 	"github.com/gorilla/websocket"
 
+	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/config"
-	"github.com/apache/servicecomb-service-center/server/connection"
 	"github.com/apache/servicecomb-service-center/server/metrics"
+	"github.com/apache/servicecomb-service-center/server/pubsub/ws"
+	discosvc "github.com/apache/servicecomb-service-center/server/service/disco"
 )
 
 const (
@@ -81,7 +81,7 @@ func (c *client) sendClose(code int, text string) error {
 	if code != websocket.CloseNoStatusReceived {
 		message = websocket.FormatCloseMessage(code, text)
 	}
-	err := c.conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(connection.SendTimeout))
+	err := c.conn.WriteControl(websocket.CloseMessage, message, time.Now().Add(ws.SendTimeout))
 	if err != nil {
 		log.Error(fmt.Sprintf("watcher[%s] catch an err", remoteAddr), err)
 		return err
@@ -98,7 +98,7 @@ func (c *client) heartbeat() {
 	}()
 	for {
 		<-ticker.C
-		err := c.conn.SetWriteDeadline(time.Now().Add(connection.SendTimeout))
+		err := c.conn.SetWriteDeadline(time.Now().Add(ws.SendTimeout))
 		if err != nil {
 			log.Error("", err)
 		}
@@ -116,18 +116,24 @@ func (c *client) handleMessage() {
 
 	remoteAddr := c.conn.RemoteAddr().String()
 	c.conn.SetPongHandler(func(message string) error {
-		err := c.conn.SetReadDeadline(time.Now().Add(connection.ReadTimeout))
+		err := c.conn.SetReadDeadline(time.Now().Add(ws.ReadTimeout))
 		if err != nil {
 			log.Error("", err)
 		}
-		log.Infof("received 'Pong' message '%s' from watcher[%s]\n", message, remoteAddr)
+		log.Info(fmt.Sprintf("received 'Pong' message '%s' from watcher[%s]\n", message, remoteAddr))
 		request := &pb.HeartbeatRequest{
 			ServiceId:  c.serviceID,
 			InstanceId: c.instanceID,
 		}
-		_, err = discosvc.Heartbeat(c.cxt, request)
-		if err != nil {
+		err = discosvc.SendHeartbeat(c.cxt, request)
+		if err != nil && errsvc.IsErrEqualCode(err, pb.ErrInstanceNotExists) {
 			log.Error("instance heartbeat report failed ", err)
+			closeMessage := "heartbeat reporting failed because the instance does not exist"
+			if err := c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(pb.ErrWebsocketInstanceNotExists,
+				closeMessage), time.Now().Add(ws.SendTimeout)); err != nil {
+				log.Error("write close message failed", err)
+				return err
+			}
 		}
 		return err
 	})
@@ -149,9 +155,10 @@ func (c *client) handleMessage() {
 
 func SendEstablishError(conn *websocket.Conn, err error) {
 	remoteAddr := conn.RemoteAddr().String()
-	log.Errorf(err, "establish[%s] websocket failed.", remoteAddr)
-	if err := conn.WriteMessage(websocket.TextMessage, util.StringToBytesWithNoCopy(err.Error())); err != nil {
-		log.Errorf(err, "establish[%s] websocket failed: write message failed.", remoteAddr)
+	log.Error(fmt.Sprintf("establish[%s] websocket failed.", remoteAddr), err)
+	if err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(pb.ErrWebsocketInstanceNotExists,
+		"heartbeat reporting failed because the instance does not exist"), time.Now().Add(ws.SendTimeout)); err != nil {
+		log.Error(fmt.Sprintf("establish[%s] websocket failed: write message failed.", remoteAddr), err)
 	}
 }
 
@@ -180,7 +187,7 @@ func preOp(ctx context.Context, in *pb.HeartbeatRequest) error {
 	if in == nil || len(in.ServiceId) == 0 || len(in.InstanceId) == 0 {
 		return errors.New("request format invalid")
 	}
-	resp, err := datasource.GetMetadataManager().ExistInstanceByID(ctx, &pb.MicroServiceInstanceKey{
+	resp, err := datasource.GetMetadataManager().ExistInstance(ctx, &pb.MicroServiceInstanceKey{
 		ServiceId:  in.ServiceId,
 		InstanceId: in.InstanceId,
 	})

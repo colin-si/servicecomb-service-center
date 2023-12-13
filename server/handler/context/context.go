@@ -23,6 +23,7 @@ import (
 	"github.com/apache/servicecomb-service-center/pkg/chain"
 	"github.com/apache/servicecomb-service-center/pkg/rest"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	syncsvc "github.com/apache/servicecomb-service-center/server/service/sync"
 )
 
 const (
@@ -47,6 +48,8 @@ func (c *Handler) Handle(i *chain.Invocation) {
 	case v4.IsMatch(r):
 		v4.Write(r)
 	}
+
+	syncsvc.SetContext(i.Context())
 
 	c.commonQueryToContext(i)
 

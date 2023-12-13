@@ -24,30 +24,29 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-chassis/cari/rbac"
+	crbac "github.com/go-chassis/cari/rbac"
+	"github.com/little-cui/etcdadpt"
 
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
-	"github.com/apache/servicecomb-service-center/pkg/etcdsync"
+	esync "github.com/apache/servicecomb-service-center/datasource/etcd/sync"
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	rbacsvc "github.com/apache/servicecomb-service-center/server/service/rbac"
 )
 
-type RoleManager struct {
-}
+const isMigrated = "/cse-sr/role-migrated"
 
-func (rm *RoleManager) CreateRole(ctx context.Context, r *rbac.Role) error {
-	lock, err := etcdsync.Lock("/role-creating/"+r.Name, -1, false)
-	if err != nil {
-		return fmt.Errorf("role %s is creating", r.Name)
+var (
+	resources   = crbac.BuildResourceList(rbacsvc.ResourceConfig)
+	configPerms = &crbac.Permission{
+		Resources: resources,
+		Verbs:     []string{"*"},
 	}
-	defer func() {
-		err := lock.Unlock()
-		if err != nil {
-			log.Error("can not release role lock", err)
-		}
-	}()
+)
+
+func (rm *RbacDAO) CreateRole(ctx context.Context, r *crbac.Role) error {
 	key := path.GenerateRBACRoleKey(r.Name)
 	exist, err := rm.RoleExist(ctx, r.Name)
 	if err != nil {
@@ -55,7 +54,7 @@ func (rm *RoleManager) CreateRole(ctx context.Context, r *rbac.Role) error {
 		return err
 	}
 	if exist {
-		return datasource.ErrRoleDuplicated
+		return rbac.ErrRoleDuplicated
 	}
 	r.ID = util.GenerateUUID()
 	r.CreateTime = strconv.FormatInt(time.Now().Unix(), 10)
@@ -65,7 +64,16 @@ func (rm *RoleManager) CreateRole(ctx context.Context, r *rbac.Role) error {
 		log.Error("role info is invalid", err)
 		return err
 	}
-	err = client.PutBytes(ctx, key, value)
+	opts := []etcdadpt.OpOptions{
+		etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(value)),
+	}
+	syncOpts, err := esync.GenCreateOpts(ctx, datasource.ResourceRole, r)
+	if err != nil {
+		log.Error("fail to create sync opts", err)
+		return err
+	}
+	opts = append(opts, syncOpts...)
+	err = etcdadpt.Txn(ctx, opts)
 	if err != nil {
 		log.Error("can not save account info", err)
 		return err
@@ -74,46 +82,34 @@ func (rm *RoleManager) CreateRole(ctx context.Context, r *rbac.Role) error {
 	return nil
 }
 
-func (rm *RoleManager) RoleExist(ctx context.Context, name string) (bool, error) {
-	resp, err := client.Instance().Do(ctx, client.GET,
-		client.WithStrKey(path.GenerateRBACRoleKey(name)))
-	if err != nil {
-		return false, err
-	}
-	if resp.Count == 0 {
-		return false, nil
-	}
-	return true, nil
+func (rm *RbacDAO) RoleExist(ctx context.Context, name string) (bool, error) {
+	return etcdadpt.Exist(ctx, path.GenerateRBACRoleKey(name))
 }
-func (rm *RoleManager) GetRole(ctx context.Context, name string) (*rbac.Role, error) {
-	resp, err := client.Instance().Do(ctx, client.GET,
-		client.WithStrKey(path.GenerateRBACRoleKey(name)))
+
+func (rm *RbacDAO) GetRole(ctx context.Context, name string) (*crbac.Role, error) {
+	kv, err := etcdadpt.Get(ctx, path.GenerateRBACRoleKey(name))
 	if err != nil {
 		return nil, err
 	}
-	if resp.Count == 0 {
-		return nil, datasource.ErrRoleNotExist
+	if kv == nil {
+		return nil, rbac.ErrRoleNotExist
 	}
-	if resp.Count != 1 {
-		return nil, client.ErrNotUnique
-	}
-	role := &rbac.Role{}
-	err = json.Unmarshal(resp.Kvs[0].Value, role)
+	role := &crbac.Role{}
+	err = json.Unmarshal(kv.Value, role)
 	if err != nil {
-		log.Errorf(err, "role info format invalid")
+		log.Error("role info format invalid", err)
 		return nil, err
 	}
 	return role, nil
 }
-func (rm *RoleManager) ListRole(ctx context.Context) ([]*rbac.Role, int64, error) {
-	resp, err := client.Instance().Do(ctx, client.GET,
-		client.WithStrKey(path.GenerateRBACRoleKey("")), client.WithPrefix())
+func (rm *RbacDAO) ListRole(ctx context.Context) ([]*crbac.Role, int64, error) {
+	kvs, n, err := etcdadpt.List(ctx, path.GenerateRBACRoleKey(""))
 	if err != nil {
 		return nil, 0, err
 	}
-	roles := make([]*rbac.Role, 0, resp.Count)
-	for _, v := range resp.Kvs {
-		r := &rbac.Role{}
+	roles := make([]*crbac.Role, 0, n)
+	for _, v := range kvs {
+		r := &crbac.Role{}
 		err = json.Unmarshal(v.Value, r)
 		if err != nil {
 			log.Error("role info format invalid:", err)
@@ -122,41 +118,80 @@ func (rm *RoleManager) ListRole(ctx context.Context) ([]*rbac.Role, int64, error
 
 		roles = append(roles, r)
 	}
-	return roles, resp.Count, nil
+	return roles, n, nil
 }
-func (rm *RoleManager) DeleteRole(ctx context.Context, name string) (bool, error) {
+func (rm *RbacDAO) DeleteRole(ctx context.Context, name string) (bool, error) {
 	exists, err := RoleBindingExists(ctx, name)
 	if err != nil {
-		log.Error("", err)
+		log.Error("check role binding existence failed", err)
 		return false, err
 	}
 	if exists {
-		return false, datasource.ErrRoleBindingExist
+		return false, rbac.ErrRoleBindingExist
 	}
-	resp, err := client.Instance().Do(ctx, client.DEL,
-		client.WithStrKey(path.GenerateRBACRoleKey(name)))
+	opts := []etcdadpt.OpOptions{etcdadpt.OpDel(etcdadpt.WithStrKey(path.GenerateRBACRoleKey(name)))}
+	syncOpts, err := esync.GenDeleteOpts(ctx, datasource.ResourceRole, name, name)
+	if err != nil {
+		log.Error("fail to create sync opts", err)
+		return false, err
+	}
+	opts = append(opts, syncOpts...)
+	err = etcdadpt.Txn(ctx, opts)
 	if err != nil {
 		return false, err
 	}
-	return resp.Succeeded, nil
+	return true, nil
 }
 func RoleBindingExists(ctx context.Context, role string) (bool, error) {
-	_, total, err := client.List(ctx, path.GenRoleAccountPrefixIdxKey(role))
+	_, total, err := etcdadpt.List(ctx, path.GenRoleAccountPrefixIdxKey(role))
 	if err != nil {
-		log.Error("", err)
+		log.Error("list role account failed", err)
 		return false, err
 	}
 	return total > 0, nil
 }
-func (rm *RoleManager) UpdateRole(ctx context.Context, name string, role *rbac.Role) error {
+func (rm *RbacDAO) UpdateRole(ctx context.Context, name string, role *crbac.Role) error {
 	role.UpdateTime = strconv.FormatInt(time.Now().Unix(), 10)
 	value, err := json.Marshal(role)
 	if err != nil {
-		log.Errorf(err, "role info is invalid")
+		log.Error("role info is invalid", err)
 		return err
 	}
-	_, err = client.Instance().Do(ctx, client.PUT,
-		client.WithStrKey(path.GenerateRBACRoleKey(name)),
-		client.WithValue(value))
-	return err
+	opts := []etcdadpt.OpOptions{
+		etcdadpt.OpPut(etcdadpt.WithStrKey(path.GenerateRBACRoleKey(name)), etcdadpt.WithValue(value)),
+	}
+	syncOpts, err := esync.GenUpdateOpts(ctx, datasource.ResourceRole, role)
+	if err != nil {
+		log.Error("fail to create sync opts", err)
+		return err
+	}
+	opts = append(opts, syncOpts...)
+	return etcdadpt.Txn(ctx, opts)
+}
+func (rm *RbacDAO) MigrateOldRoles(ctx context.Context) error {
+	exist, err := etcdadpt.Exist(ctx, isMigrated)
+	if err != nil {
+		return err
+	}
+	if exist {
+		return nil
+	}
+	rs, _, err := rbac.Instance().ListRole(ctx)
+	if err != nil {
+		return err
+	}
+	for _, role := range rs {
+		role.Perms = append(role.Perms, configPerms)
+		err = rbac.Instance().UpdateRole(ctx, role.Name, role)
+		if err != nil {
+			log.Error(fmt.Sprintf("edit role [%s] info faied", role.Name), err)
+			return err
+		}
+	}
+	err = etcdadpt.Put(ctx, isMigrated, "true")
+	if err != nil {
+		log.Error("can not save migrated flag", err)
+		return err
+	}
+	return nil
 }

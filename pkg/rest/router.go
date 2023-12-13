@@ -32,8 +32,8 @@ var doNothingFunc = func(_ chain.Result) {}
 
 // Router is a HTTP request multiplexer
 // Attention:
-//   1. not thread-safe, must be initialized completely before serve http request
-//   2. redirect not supported
+//  1. not thread-safe, must be initialized completely before serve http request
+//  2. redirect not supported
 type Router struct {
 	handlers  map[string][]*urlPatternHandler
 	chainName string
@@ -42,11 +42,11 @@ type Router struct {
 // RegisterServant registers a RouteGroup
 // servant must be an pointer to service object
 func (router *Router) RegisterServant(servant RouteGroup) {
-	log.Infof("register servant %s", util.Reflect(servant).Name())
+	log.Info(fmt.Sprintf("register servant %s", util.Reflect(servant).Name()))
 	for _, route := range servant.URLPatterns() {
 		err := router.addRoute(&route)
 		if err != nil {
-			log.Errorf(err, "register route failed.")
+			log.Error("register route failed.", err)
 		}
 	}
 }
@@ -59,13 +59,13 @@ func (router *Router) addRoute(route *Route) (err error) {
 	method := strings.ToUpper(route.Method)
 	if !isValidMethod(method) || !strings.HasPrefix(route.Path, "/") || route.Func == nil {
 		message := fmt.Sprintf("Invalid route parameters(method: %s, path: %s)", method, route.Path)
-		log.Errorf(nil, message)
+		log.Error(message, nil)
 		return errors.New(message)
 	}
 
 	router.handlers[method] = append(router.handlers[method], &urlPatternHandler{
 		util.FormatFuncName(util.FuncName(route.Func)), route.Path, http.HandlerFunc(route.Func)})
-	log.Infof("register route %s(%s)", route.Path, method)
+	log.Info(fmt.Sprintf("register route %s(%s)", route.Path, method))
 
 	return nil
 }
@@ -121,7 +121,7 @@ func (router *Router) serve(ph *urlPatternHandler, w http.ResponseWriter, r *htt
 		Invoke(doNothingFunc)
 }
 
-// NewRouter news an Router
+// NewRouter news a Router
 func NewRouter() *Router {
 	return &Router{
 		handlers: make(map[string][]*urlPatternHandler),

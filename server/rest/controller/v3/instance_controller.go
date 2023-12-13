@@ -14,29 +14,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package v3
 
 import (
 	"net/http"
 
 	"github.com/apache/servicecomb-service-center/pkg/rest"
-	v4 "github.com/apache/servicecomb-service-center/server/rest/controller/v4"
+	v4 "github.com/apache/servicecomb-service-center/server/resource/disco"
 )
 
 type MicroServiceInstanceService struct {
-	v4.MicroServiceInstanceService
+	v4.InstanceResource
 }
 
-func (this *MicroServiceInstanceService) URLPatterns() []rest.Route {
+func (s *MicroServiceInstanceService) URLPatterns() []rest.Route {
 	return []rest.Route{
-		{http.MethodGet, "/registry/v3/instances", this.FindInstances},
-		{http.MethodGet, "/registry/v3/microservices/:serviceId/instances", this.GetInstances},
-		{http.MethodGet, "/registry/v3/microservices/:serviceId/instances/:instanceId", this.GetOneInstance},
-		{http.MethodPost, "/registry/v3/microservices/:serviceId/instances", this.RegisterInstance},
-		{http.MethodDelete, "/registry/v3/microservices/:serviceId/instances/:instanceId", this.UnregisterInstance},
-		{http.MethodPut, "/registry/v3/microservices/:serviceId/instances/:instanceId/properties", this.UpdateMetadata},
-		{http.MethodPut, "/registry/v3/microservices/:serviceId/instances/:instanceId/status", this.UpdateStatus},
-		{http.MethodPut, "/registry/v3/microservices/:serviceId/instances/:instanceId/heartbeat", this.Heartbeat},
-		{http.MethodPut, "/registry/v3/heartbeats", this.HeartbeatSet},
+		{Method: http.MethodGet, Path: "/registry/v3/instances", Func: s.FindInstances},
+		{Method: http.MethodGet, Path: "/registry/v3/microservices/:serviceId/instances", Func: s.ListInstance},
+		{Method: http.MethodGet, Path: "/registry/v3/microservices/:serviceId/instances/:instanceId", Func: s.GetInstance},
+		{Method: http.MethodPost, Path: "/registry/v3/microservices/:serviceId/instances", Func: s.LegacyRegisterInstance},
+		{Method: http.MethodDelete, Path: "/registry/v3/microservices/:serviceId/instances/:instanceId", Func: s.UnregisterInstance},
+		{Method: http.MethodPut, Path: "/registry/v3/microservices/:serviceId/instances/:instanceId/properties", Func: s.PutInstanceProperties},
+		{Method: http.MethodPut, Path: "/registry/v3/microservices/:serviceId/instances/:instanceId/status", Func: s.PutInstanceStatus},
+		{Method: http.MethodPut, Path: "/registry/v3/microservices/:serviceId/instances/:instanceId/heartbeat", Func: s.SendHeartbeat},
+		{Method: http.MethodPut, Path: "/registry/v3/heartbeats", Func: s.SendManyHeartbeat},
 	}
 }

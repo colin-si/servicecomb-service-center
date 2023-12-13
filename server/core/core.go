@@ -18,29 +18,81 @@
 package core
 
 import (
+	"fmt"
+	"net"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/go-chassis/go-chassis/v2"
+
+	//go-chassis plugin
+	_ "github.com/go-chassis/go-chassis-extension/codec/gojson"
+	_ "github.com/go-chassis/go-chassis-extension/protocol/fiber4r"
+	_ "github.com/go-chassis/go-chassis-extension/protocol/grpc/server"
+	_ "github.com/go-chassis/go-chassis/v2/middleware/monitoring"
+	_ "github.com/go-chassis/go-chassis/v2/middleware/ratelimiter"
 
 	// import the grace package and parse grace cmd line
 	_ "github.com/apache/servicecomb-service-center/pkg/grace"
+
+	"github.com/apache/servicecomb-service-center/pkg/goutil"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/server/config"
+	"github.com/apache/servicecomb-service-center/server/metrics"
 )
 
-func Initialize() {
+const (
+	defaultCollectPeriod = 30 * time.Second
+)
+
+// Init init chassis and sc configs
+func Init() {
+	if err := chassis.Init(); err != nil {
+		log.Warn(err.Error())
+	}
 	// initialize configuration
 	config.Init()
-	// Register global services
-	RegisterGlobalServices()
 	// Logging
 	initLogger()
+	// go pool
+	goutil.Init()
+	// init the sc registration
+	InitRegistration()
+	// Register global services
+	RegisterGlobalServices()
+	// init metrics
+	initMetrics()
 }
 
 func initLogger() {
-	log.SetGlobal(log.Config{
+	log.Init(log.Config{
 		LoggerLevel:    config.GetLog().LogLevel,
 		LoggerFile:     os.ExpandEnv(config.GetLog().LogFilePath),
 		LogFormatText:  config.GetLog().LogFormat == "text",
 		LogRotateSize:  int(config.GetLog().LogRotateSize),
 		LogBackupCount: int(config.GetLog().LogBackupCount),
 	})
+}
+
+func initMetrics() {
+	if !config.GetBool("metrics.enable", false) {
+		return
+	}
+	interval, err := time.ParseDuration(strings.TrimSpace(config.GetString("metrics.interval", defaultCollectPeriod.String())))
+	if err != nil {
+		log.Error(fmt.Sprintf("invalid metrics config[interval], set default %s", defaultCollectPeriod), err)
+	}
+	if interval <= time.Second {
+		interval = defaultCollectPeriod
+	}
+	instance := net.JoinHostPort(config.GetString("server.host", "", config.WithStandby("httpaddr")),
+		config.GetString("server.port", "", config.WithStandby("httpport")))
+
+	if err := metrics.Init(metrics.Options{
+		Interval: interval,
+		Instance: instance,
+	}); err != nil {
+		log.Fatal("init metrics failed", err)
+	}
 }

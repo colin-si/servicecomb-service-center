@@ -18,7 +18,19 @@
 package datasource
 
 const (
-	ServiceKeyPrefix  = "/cse-sr/ms/files"
-	InstanceKeyPrefix = "/cse-sr/inst/files"
-	SPLIT             = "/"
+	SPLIT                 = "/"
+	ServiceKeyPrefix      = "/cse-sr/ms/files"
+	InstanceKeyPrefix     = "/cse-sr/inst/files"
+	RegistryDomain        = "default"
+	RegistryProject       = "default"
+	RegistryDomainProject = "default/default"
+	RegistryAppID         = "default"
+	Provider              = "p"
+
+	ResourceAccount   = "account"
+	ResourceRole      = "role"
+	ResourceService   = "service"
+	ResourceKV        = "kv"
+	ResourceInstance  = "instance"
+	ResourceHeartbeat = "heartbeat"
 )

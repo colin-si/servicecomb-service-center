@@ -20,9 +20,9 @@ package datasource
 // DataSource is the DAO layer
 type DataSource interface {
 	SystemManager() SystemManager
-	AccountManager() AccountManager
-	RoleManager() RoleManager
 	DependencyManager() DependencyManager
 	MetadataManager() MetadataManager
 	SCManager() SCManager
+	MetricsManager() MetricsManager
+	SyncManager() SyncManager
 }

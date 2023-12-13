@@ -1,20 +1,18 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package datasource
@@ -40,40 +38,22 @@ type Dependency struct {
 	CreateDependencyRuleList []*discovery.MicroServiceKey
 }
 
-func ParamsChecker(consumerInfo *discovery.MicroServiceKey, providersInfo []*discovery.MicroServiceKey) *discovery.CreateDependenciesResponse {
+func ParamsChecker(consumerInfo *discovery.MicroServiceKey, providersInfo []*discovery.MicroServiceKey) error {
 	flag := make(map[string]bool, len(providersInfo))
 	for _, providerInfo := range providersInfo {
-		//存在带*的情况，后面的数据就不校验了
-		if providerInfo.ServiceName == "*" {
-			break
+		if len(providerInfo.ServiceName) == 0 {
+			return discovery.NewError(discovery.ErrInvalidParams, "Required provider serviceName")
 		}
 		if len(providerInfo.AppId) == 0 {
 			providerInfo.AppId = consumerInfo.AppId
 		}
-
-		version := providerInfo.Version
-		if len(version) == 0 {
-			return BadParamsResponse("Required provider version")
-		}
-
-		providerInfo.Version = ""
+		providerInfo.Version = AllVersions
 		if _, ok := flag[toString(providerInfo)]; ok {
-			return BadParamsResponse("Invalid request body for provider info.Duplicate provider or (serviceName and appId is same).")
+			return discovery.NewError(discovery.ErrInvalidParams, "Invalid request body for provider info.Duplicate provider or (serviceName and appId is same).")
 		}
 		flag[toString(providerInfo)] = true
-		providerInfo.Version = version
 	}
 	return nil
-}
-
-func BadParamsResponse(detailErr string) *discovery.CreateDependenciesResponse {
-	log.Error(fmt.Sprintf("request params is invalid. %s", detailErr), nil)
-	if len(detailErr) == 0 {
-		detailErr = "Request params is invalid."
-	}
-	return &discovery.CreateDependenciesResponse{
-		Response: discovery.CreateResponse(discovery.ErrInvalidParams, detailErr),
-	}
 }
 
 func toString(in *discovery.MicroServiceKey) string {
@@ -88,13 +68,6 @@ func ParseAddOrUpdateRules(ctx context.Context, dep *Dependency, oldProviderRule
 		if ok, _ := ContainServiceDependency(oldProviderRules.Dependency, tmpProviderRule); ok {
 			continue
 		}
-
-		if tmpProviderRule.ServiceName == "*" {
-			createDependencyRuleList = append([]*discovery.MicroServiceKey{}, tmpProviderRule)
-			deleteDependencyRuleList = oldProviderRules.Dependency
-			break
-		}
-
 		createDependencyRuleList = append(createDependencyRuleList, tmpProviderRule)
 		old := IsNeedUpdate(oldProviderRules.Dependency, tmpProviderRule)
 		if old != nil {
@@ -102,14 +75,10 @@ func ParseAddOrUpdateRules(ctx context.Context, dep *Dependency, oldProviderRule
 		}
 	}
 	for _, oldProviderRule := range oldProviderRules.Dependency {
-		if oldProviderRule.ServiceName == "*" {
-			return
-		}
 		if ok, _ := ContainServiceDependency(deleteDependencyRuleList, oldProviderRule); !ok {
 			existDependencyRuleList = append(existDependencyRuleList, oldProviderRule)
 		}
 	}
-
 	dep.ProvidersRule = append(createDependencyRuleList, existDependencyRuleList...)
 	setDep(dep, createDependencyRuleList, existDependencyRuleList, deleteDependencyRuleList)
 }

@@ -14,39 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package main
 
 import (
-	"flag"
-	"fmt"
-
-	"net"
-	"net/url"
-	"strconv"
-
-	"github.com/astaxie/beego"
+	"github.com/apache/servicecomb-service-center/frontend/server"
 )
 
-type Config struct {
-	frontendAddr string
-	scAddr       string
-}
-
 func main() {
-	frontendIp := beego.AppConfig.String("frontend_host_ip")
-	frontendPort := beego.AppConfig.DefaultInt("frontend_host_port", 30103)
-
-	scIp := beego.AppConfig.DefaultString("httpaddr", "127.0.0.1")
-	scPort := beego.AppConfig.DefaultInt("httpport", 30100)
-
-	// command line flags
-	port := flag.Int("port", frontendPort, "port to serve on")
-	flag.Parse()
-
-	cfg := Config{}
-	cfg.scAddr = fmt.Sprintf("http://%s/", net.JoinHostPort(url.PathEscape(scIp), strconv.Itoa(scPort)))
-	cfg.frontendAddr = net.JoinHostPort(frontendIp, strconv.Itoa(*port))
+	cfg := server.DefaultConfig()
 
 	// run frontend web server
-	Serve(cfg)
+	server.Serve(cfg)
 }

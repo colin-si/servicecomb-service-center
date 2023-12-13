@@ -18,8 +18,11 @@
 package metrics
 
 import (
+	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/apache/servicecomb-service-center/server/config"
 
 	"github.com/apache/servicecomb-service-center/pkg/chain"
 	"github.com/apache/servicecomb-service-center/pkg/log"
@@ -39,10 +42,12 @@ func (h *Handler) Handle(i *chain.Invocation) {
 		w, r := i.Context().Value(rest.CtxResponse).(http.ResponseWriter),
 			i.Context().Value(rest.CtxRequest).(*http.Request)
 		metrics.ReportRequestCompleted(w, r, start)
-		log.NilOrWarnf(start, "%s %s", r.Method, r.RequestURI)
+		log.NilOrWarn(start, fmt.Sprintf("%s %s", r.Method, r.RequestURI))
 	}))
 }
 
 func RegisterHandlers() {
-	chain.RegisterHandler(rest.ServerChainName, &Handler{})
+	if config.GetBool("metrics.enable", false) {
+		chain.RegisterHandler(rest.ServerChainName, &Handler{})
+	}
 }

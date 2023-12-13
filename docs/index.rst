@@ -14,19 +14,18 @@ Welcome to servicecomb-service-center's documentation!
    intro
    get-started
    user-guides
-   plugin-tracing-guides
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Development Documentations
-
-   dev-guides
 
 .. toctree::
    :maxdepth: 2
    :caption: Design Documentations
 
    design-guides
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Development Documentations
+
+   dev-guides
 
 .. toctree::
    :maxdepth: 2

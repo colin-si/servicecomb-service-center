@@ -1,17 +1,19 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package core
 
@@ -19,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/server/config"
 	"github.com/go-chassis/cari/discovery"
 )
@@ -29,13 +32,13 @@ func init() {
 
 func TestPrepareSelfRegistration(t *testing.T) {
 	config.Server.Environment = "dev"
-	prepareSelfRegistration()
+	InitRegistration()
 	if Service == nil || Service.Environment != "development" {
 		t.Fatalf("TestPrepareSelfRegistration faild, %v", Service)
 	}
 
 	config.Server.Environment = "prod"
-	prepareSelfRegistration()
+	InitRegistration()
 	if Service == nil || Service.AppId != "default" || Service.ServiceName != "SERVICECENTER" ||
 		Service.Environment != "production" || Service.Properties["allowCrossApp"] != "true" {
 		t.Fatalf("TestPrepareSelfRegistration faild, %v", Service)
@@ -58,28 +61,28 @@ func TestPrepareSelfRegistration(t *testing.T) {
 
 func TestSetSharedMode(t *testing.T) {
 	RegisterGlobalServices()
-	if IsGlobal(&discovery.MicroServiceKey{}) {
+	if datasource.IsGlobal(&discovery.MicroServiceKey{}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
-	if IsGlobal(&discovery.MicroServiceKey{Tenant: "default"}) {
+	if datasource.IsGlobal(&discovery.MicroServiceKey{Tenant: "default"}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
-	if IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default"}) {
+	if datasource.IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default"}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
-	if IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default"}) {
+	if datasource.IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default"}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
 
 	config.Server.Config.GlobalVisible = "shared"
 	RegisterGlobalServices()
-	if IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default", ServiceName: "no-shared"}) {
+	if datasource.IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default", ServiceName: "no-shared"}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
-	if !IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default", ServiceName: "shared"}) {
+	if !datasource.IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default", ServiceName: "shared"}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
-	if !IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default", Alias: "shared"}) {
+	if !datasource.IsGlobal(&discovery.MicroServiceKey{Tenant: "default/default", AppId: "default", Alias: "shared"}) {
 		t.Fatalf("TestSetSharedMode failed")
 	}
 }

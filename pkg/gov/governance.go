@@ -17,36 +17,33 @@
 
 package gov
 
-//GovernancePolicy is a unified struct
-//all governance policy must extend this struct
-//Name is the policy name, for example: "rate-limit-payment-api"
-//MD is metadata.
+// GovernancePolicy is a unified struct
+// all governance policy must extend this struct
+// Name is the policy name, for example: "rate-limit-payment-api"
+// MD is metadata.
 type GovernancePolicy struct {
-	Name       string    `json:"name,omitempty"`
-	ID         string    `json:"id,omitempty"`
-	Status     string    `json:"status,omitempty"`
-	CreatTime  int64     `json:"creatTime,omitempty"`
-	UpdateTime int64     `json:"updateTime,omitempty"`
-	Selector   *Selector `json:"selector,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	ID         string   `json:"id,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	CreatTime  int64    `json:"creatTime,omitempty"`
+	UpdateTime int64    `json:"updateTime,omitempty"`
+	Selector   Selector `json:"selector,omitempty"`
 }
 
-//DisplayData define display data
+// DisplayData define display data
 type DisplayData struct {
 	Policies   []*Policy `json:"policies,omitempty"`
 	MatchGroup *Policy   `json:"matchGroup,omitempty"`
 }
 
-//Policy define policy and fault tolerant policy
+// Policy define policy and fault tolerant policy
 type Policy struct {
 	*GovernancePolicy
-	Kind string      `json:"kind,omitempty"`
-	Spec interface{} `json:"spec,omitempty"`
+	Kind string                 `json:"kind,omitempty"`
+	Spec map[string]interface{} `json:"spec,omitempty"`
 }
 
-type Selector struct {
-	App         string `json:"app,omitempty"`
-	Environment string `json:"environment,omitempty"`
-}
+type Selector map[string]string
 
 type LBSpec struct {
 	MarkerName string         `json:"match"`

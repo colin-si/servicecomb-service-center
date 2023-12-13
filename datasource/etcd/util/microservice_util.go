@@ -23,25 +23,27 @@ import (
 	"fmt"
 	"strings"
 
+	pb "github.com/go-chassis/cari/discovery"
+	"github.com/little-cui/etcdadpt"
+
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/sync"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
-	"github.com/apache/servicecomb-service-center/server/plugin/quota"
-	pb "github.com/go-chassis/cari/discovery"
+	"github.com/apache/servicecomb-service-center/server/config"
 )
 
 /*
-	get Service by service id
+get Service by service id
 */
 func GetServiceWithRev(ctx context.Context, domain string, id string, rev int64) (*pb.MicroService, error) {
 	key := path.GenerateServiceKey(domain, id)
-	serviceResp, err := kv.Store().Service().Search(ctx,
-		client.WithStrKey(key),
-		client.WithRev(rev))
+	serviceResp, err := sd.Service().Search(ctx,
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithRev(rev))
 	if err != nil {
 		return nil, err
 	}
@@ -53,8 +55,8 @@ func GetServiceWithRev(ctx context.Context, domain string, id string, rev int64)
 
 func GetService(ctx context.Context, domainProject string, serviceID string) (*pb.MicroService, error) {
 	key := path.GenerateServiceKey(domainProject, serviceID)
-	opts := append(FromContext(ctx), client.WithStrKey(key))
-	serviceResp, err := kv.Store().Service().Search(ctx, opts...)
+	opts := append(FromContext(ctx), etcdadpt.WithStrKey(key))
+	serviceResp, err := sd.Service().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -64,26 +66,26 @@ func GetService(ctx context.Context, domainProject string, serviceID string) (*p
 	return serviceResp.Kvs[0].Value.(*pb.MicroService), nil
 }
 
-func getServicesRawData(ctx context.Context, domainProject string) ([]*sd.KeyValue, error) {
+func getServicesRawData(ctx context.Context, domainProject string) ([]*kvstore.KeyValue, error) {
 	key := path.GenerateServiceKey(domainProject, "")
 	opts := append(FromContext(ctx),
-		client.WithStrKey(key),
-		client.WithPrefix())
-	resp, err := kv.Store().Service().Search(ctx, opts...)
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithPrefix())
+	resp, err := sd.Service().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return resp.Kvs, err
 }
 
-//GetAllServicesAcrossDomainProject get services of all domains, projects
-//the map's key is domainProject
+// GetAllServicesAcrossDomainProject get services of all domains, projects
+// the map's key is domainProject
 func GetAllServicesAcrossDomainProject(ctx context.Context) (map[string][]*pb.MicroService, error) {
 	key := path.GetServiceRootKey("")
 	opts := append(FromContext(ctx),
-		client.WithStrKey(key),
-		client.WithPrefix())
-	serviceResp, err := kv.Store().Service().Search(ctx, opts...)
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithPrefix())
+	serviceResp, err := sd.Service().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +139,8 @@ func GetServiceID(ctx context.Context, key *pb.MicroServiceKey) (serviceID strin
 }
 
 func searchServiceID(ctx context.Context, key *pb.MicroServiceKey) (string, error) {
-	opts := append(FromContext(ctx), client.WithStrKey(path.GenerateServiceIndexKey(key)))
-	resp, err := kv.Store().ServiceIndex().Search(ctx, opts...)
+	opts := append(FromContext(ctx), etcdadpt.WithStrKey(path.GenerateServiceIndexKey(key)))
+	resp, err := sd.ServiceIndex().Search(ctx, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -149,8 +151,8 @@ func searchServiceID(ctx context.Context, key *pb.MicroServiceKey) (string, erro
 }
 
 func searchServiceIDFromAlias(ctx context.Context, key *pb.MicroServiceKey) (string, error) {
-	opts := append(FromContext(ctx), client.WithStrKey(path.GenerateServiceAliasKey(key)))
-	resp, err := kv.Store().ServiceAlias().Search(ctx, opts...)
+	opts := append(FromContext(ctx), etcdadpt.WithStrKey(path.GenerateServiceAliasKey(key)))
+	resp, err := sd.ServiceAlias().Search(ctx, opts...)
 	if err != nil {
 		return "", err
 	}
@@ -160,68 +162,68 @@ func searchServiceIDFromAlias(ctx context.Context, key *pb.MicroServiceKey) (str
 	return resp.Kvs[0].Value.(string), nil
 }
 
-func GetServiceAllVersions(ctx context.Context, key *pb.MicroServiceKey, alias bool) (*sd.Response, error) {
+func GetServiceAllVersions(ctx context.Context, key *pb.MicroServiceKey, alias bool) (*kvstore.Response, error) {
 	copy := *key
 	copy.Version = ""
 	var (
 		prefix  string
-		indexer sd.Indexer
+		indexer kvstore.Indexer
 	)
 	if alias {
 		prefix = path.GenerateServiceAliasKey(&copy)
-		indexer = kv.Store().ServiceAlias()
+		indexer = sd.ServiceAlias()
 	} else {
 		prefix = path.GenerateServiceIndexKey(&copy)
-		indexer = kv.Store().ServiceIndex()
+		indexer = sd.ServiceIndex()
 	}
 	opts := append(FromContext(ctx),
-		client.WithStrKey(prefix),
-		client.WithPrefix(),
-		client.WithDescendOrder())
+		etcdadpt.WithStrKey(prefix),
+		etcdadpt.WithPrefix())
 	resp, err := indexer.Search(ctx, opts...)
 	return resp, err
 }
 
-func FindServiceIds(ctx context.Context, versionRule string, key *pb.MicroServiceKey) ([]string, bool, error) {
-	// 版本规则
-	match := ParseVersionRule(versionRule)
-	if match == nil {
-		copy := *key
-		copy.Version = versionRule
-		serviceID, err := GetServiceID(ctx, &copy)
-		if err != nil {
-			return nil, false, err
-		}
-		if len(serviceID) > 0 {
-			return []string{serviceID}, true, nil
-		}
-		return nil, false, nil
-	}
-
-	searchAlias := false
-	alsoFindAlias := len(key.Alias) > 0
-
-FIND_RULE:
-	resp, err := GetServiceAllVersions(ctx, key, searchAlias)
+// FindServiceIds return serviceIDs match the key, the existence of the micro-service without consider of version
+func FindServiceIds(ctx context.Context, key *pb.MicroServiceKey, matchVersion bool) ([]string, bool, error) {
+	resp, err := GetServiceAllVersions(ctx, key, false)
 	if err != nil {
 		return nil, false, err
 	}
-	if len(resp.Kvs) == 0 {
-		if !alsoFindAlias {
-			return nil, false, nil
+	fromEtcdKey := path.GetInfoFromSvcIndexKV
+	kvs := resp.Kvs
+	if len(kvs) == 0 {
+		resp, err := GetServiceAllVersions(ctx, key, true)
+		if err != nil {
+			return nil, false, err
 		}
-		searchAlias = true
-		alsoFindAlias = false
-		goto FIND_RULE
+		fromEtcdKey = path.GetInfoFromSvcAliasKV
+		kvs = resp.Kvs
 	}
-	return match(resp.Kvs), true, nil
+	var (
+		etcdKeys   [][]byte
+		serviceIDs []string
+	)
+	for _, kv := range kvs {
+		etcdKeys = append(etcdKeys, kv.Key)
+		serviceIDs = append(serviceIDs, kv.Value.(string))
+	}
+	if !matchVersion {
+		return serviceIDs, len(serviceIDs) > 0, nil
+	}
+	for i, etcdKey := range etcdKeys {
+		serviceKey := fromEtcdKey(etcdKey)
+		if serviceKey.Version == key.Version {
+			return []string{serviceIDs[i]}, len(serviceIDs) > 0, nil
+		}
+	}
+	return nil, len(serviceIDs) > 0, nil
 }
 
 func ServiceExist(ctx context.Context, domainProject string, serviceID string) bool {
 	opts := append(FromContext(ctx),
-		client.WithStrKey(path.GenerateServiceKey(domainProject, serviceID)),
-		client.WithCountOnly())
-	resp, err := kv.Store().Service().Search(ctx, opts...)
+		etcdadpt.WithStrKey(path.GenerateServiceKey(domainProject, serviceID)),
+		etcdadpt.WithCountOnly())
+	resp, err := sd.Service().Search(ctx, opts...)
 	if err != nil || resp.Count == 0 {
 		return false
 	}
@@ -237,33 +239,32 @@ func GetAllServiceUtil(ctx context.Context) ([]*pb.MicroService, error) {
 	return services, nil
 }
 
-func RemandServiceQuota(ctx context.Context) {
-	quota.Remand(ctx, quota.TypeService)
-}
-
-func RemandInstanceQuota(ctx context.Context) {
-	quota.Remand(ctx, quota.TypeInstance)
-}
-
-func UpdateService(domainProject string, serviceID string, service *pb.MicroService) (opt client.PluginOp, err error) {
-	opt = client.PluginOp{}
+func UpdateService(ctx context.Context, domainProject string, serviceID string, service *pb.MicroService) ([]etcdadpt.OpOptions, error) {
+	opts := make([]etcdadpt.OpOptions, 0)
 	key := path.GenerateServiceKey(domainProject, serviceID)
 	data, err := json.Marshal(service)
 	if err != nil {
 		log.Error("marshal service file failed", err)
-		return
+		return opts, err
 	}
-	opt = client.OpPut(client.WithStrKey(key), client.WithValue(data))
-	return
+	opt := etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(data))
+	opts = append(opts, opt)
+	syncOpts, err := sync.GenUpdateOpts(ctx, datasource.ResourceKV, data, sync.WithOpts(map[string]string{"key": key}))
+	if err != nil {
+		log.Error("fail to create update opts", err)
+		return opts, err
+	}
+	opts = append(opts, syncOpts...)
+	return opts, nil
 }
 
 func GetOneDomainProjectServiceCount(ctx context.Context, domainProject string) (int64, error) {
 	key := path.GetServiceRootKey(domainProject) + path.SPLIT
 	opts := append(FromContext(ctx),
-		client.WithStrKey(key),
-		client.WithCountOnly(),
-		client.WithPrefix())
-	resp, err := kv.Store().Service().Search(ctx, opts...)
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithCountOnly(),
+		etcdadpt.WithPrefix())
+	resp, err := sd.Service().Search(ctx, opts...)
 	if err != nil {
 		return 0, err
 	}
@@ -273,12 +274,81 @@ func GetOneDomainProjectServiceCount(ctx context.Context, domainProject string) 
 func GetOneDomainProjectInstanceCount(ctx context.Context, domainProject string) (int64, error) {
 	key := path.GetInstanceRootKey(domainProject) + path.SPLIT
 	opts := append(FromContext(ctx),
-		client.WithStrKey(key),
-		client.WithCountOnly(),
-		client.WithPrefix())
-	resp, err := kv.Store().Instance().Search(ctx, opts...)
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithCountOnly(),
+		etcdadpt.WithPrefix())
+	resp, err := sd.Instance().Search(ctx, opts...)
 	if err != nil {
 		return 0, err
 	}
 	return resp.Count, nil
+}
+
+func GetGlobalInstanceCount(ctx context.Context) (int64, error) {
+	serviceIDs, err := GetGlobalServiceIDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, serviceID := range serviceIDs {
+		n, err := GetInstanceCountOfOneService(ctx, datasource.RegistryDomainProject, serviceID)
+		if err != nil {
+			return 0, err
+		}
+		count += n
+	}
+	return count, nil
+}
+
+func GetGlobalServiceIDs(ctx context.Context) ([]string, error) {
+	var serviceIDs []string
+	for name := range datasource.GlobalServiceNames {
+		key := path.GenerateServiceIndexKey(&pb.MicroServiceKey{
+			Tenant:      datasource.RegistryDomainProject,
+			Environment: getGlobalEnvironment(),
+			AppId:       datasource.RegistryAppID,
+			ServiceName: name,
+		})
+		opts := append(FromContext(ctx),
+			etcdadpt.WithStrKey(key),
+			etcdadpt.WithPrefix())
+		resp, err := sd.ServiceIndex().Search(ctx, opts...)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range resp.Kvs {
+			serviceIDs = append(serviceIDs, id.Value.(string))
+		}
+	}
+	return serviceIDs, nil
+}
+
+func GetGlobalServiceCount(ctx context.Context) (int64, error) {
+	var count int64
+	for name := range datasource.GlobalServiceNames {
+		key := path.GenerateServiceIndexKey(&pb.MicroServiceKey{
+			Tenant:      datasource.RegistryDomainProject,
+			Environment: getGlobalEnvironment(),
+			AppId:       datasource.RegistryAppID,
+			ServiceName: name,
+		})
+		opts := append(FromContext(ctx),
+			etcdadpt.WithStrKey(key),
+			etcdadpt.WithCountOnly(),
+			etcdadpt.WithPrefix())
+		resp, err := sd.ServiceIndex().Search(ctx, opts...)
+		if err != nil {
+			return 0, err
+		}
+		count += resp.Count
+	}
+	return count, nil
+}
+
+func getGlobalEnvironment() string {
+	env := pb.ENV_PROD
+	if config.GetProfile().IsDev() {
+		env = pb.ENV_DEV
+	}
+	return env
 }

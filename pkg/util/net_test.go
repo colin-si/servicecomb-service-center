@@ -19,6 +19,8 @@ package util
 import (
 	"net/http"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -117,25 +119,27 @@ func TestGetRealIP(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "https://127.0.0.1:30100/x/?a=b&c=d#e", nil)
 	req.RemoteAddr = "127.0.0.1:30100"
 	ip := GetRealIP(req)
-	if ip != "127.0.0.1" {
-		t.Fatalf("TestGetRealIP failed")
-	}
+	assert.Equal(t, "127.0.0.1", ip)
 
 	req.Header.Set("X-Real-Ip", "255.255.255.255")
 	ip = GetRealIP(req)
-	if ip != "127.0.0.1" {
-		t.Fatalf("TestGetRealIP failed")
-	}
+	assert.Equal(t, "127.0.0.1", ip)
 
 	req.Header.Set("X-Real-Ip", "4.4.4.4")
 	ip = GetRealIP(req)
-	if ip != "4.4.4.4" {
-		t.Fatalf("TestGetRealIP failed")
-	}
+	assert.Equal(t, "4.4.4.4", ip)
 
 	req.Header.Set("X-Forwarded-For", "1.1.1.1, 2.2.2.2, 3.3.3.3")
 	ip = GetRealIP(req)
-	if ip != "1.1.1.1" {
-		t.Fatalf("TestGetRealIP failed")
-	}
+	assert.Equal(t, "1.1.1.1", ip)
+
+	// ipv6
+	req, _ = http.NewRequest(http.MethodGet, "https://127.0.0.1:30100/x/?a=b&c=d#e", nil)
+	req.RemoteAddr = "[::1]:30100"
+	ip = GetRealIP(req)
+	assert.Equal(t, "::1", ip)
+
+	req.RemoteAddr = "[2008:0:0:0:8:800:200C:417A]:30100"
+	ip = GetRealIP(req)
+	assert.Equal(t, "2008:0:0:0:8:800:200C:417A", ip)
 }

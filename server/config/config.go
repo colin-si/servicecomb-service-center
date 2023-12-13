@@ -20,30 +20,21 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"time"
-
-	"github.com/go-chassis/go-archaius"
 
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/plugin"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/version"
+	"github.com/go-chassis/go-archaius"
 )
 
 const (
 	InitVersion = "0"
-
-	defaultServiceClearInterval = 12 * time.Hour //0.5 day
-	defaultServiceTTL           = 24 * time.Hour //1 day
-
-	minServiceClearInterval = 30 * time.Second
-	minServiceTTL           = 30 * time.Second
-	minCacheTTL             = 5 * time.Minute
-
-	maxServiceClearInterval = 24 * time.Hour       //1 day
-	maxServiceTTL           = 24 * 365 * time.Hour //1 year
+	minCacheTTL = 5 * time.Minute
 )
 
 var (
@@ -52,58 +43,57 @@ var (
 	App = &AppConfig{Server: Server}
 )
 
-//GetProfile return active profile
+// GetProfile return active profile
 func GetProfile() *ServerConfig {
 	return App.Server
 }
 
-//GetGov return governance configs
+// GetGov return governance configs
 func GetGov() *Gov {
 	return App.Gov
 }
 
-//GetServer return the http server configs
+// GetServer return the http server configs
 func GetServer() ServerConfigDetail {
 	return App.Server.Config
 }
 
-//GetSSL return the ssl configs
+// GetSSL return the ssl configs
 func GetSSL() ServerConfigDetail {
 	return App.Server.Config
 }
 
-//GetLog return the log configs
+// GetLog return the log configs
 func GetLog() ServerConfigDetail {
 	return App.Server.Config
 }
 
-//GetRegistry return the registry configs
+// GetRegistry return the registry configs
 func GetRegistry() ServerConfigDetail {
 	return App.Server.Config
 }
 
-//GetPlugin return the plugin configs
+// GetPlugin return the plugin configs
 func GetPlugin() ServerConfigDetail {
 	return App.Server.Config
 }
 
-//GetRBAC return the rbac configs
+// GetRBAC return the rbac configs
 func GetRBAC() ServerConfigDetail {
 	return App.Server.Config
-}
-
-//GetMetrics return the metrics configs
-func GetMetrics() Metrics {
-	return *App.Metrics
 }
 
 func Init() {
 	setCPUs()
 
-	err := archaius.Init(archaius.WithMemorySource(), archaius.WithENVSource(),
-		archaius.WithOptionalFiles([]string{filepath.Join(util.GetAppRoot(), "conf", "app.yaml")}))
+	err := archaius.Init(archaius.WithMemorySource(), archaius.WithENVSource())
 	if err != nil {
 		log.Fatal("can not init archaius", err)
+	}
+
+	err = archaius.AddFile(filepath.Join(util.GetAppRoot(), "conf", "app.yaml"))
+	if err != nil {
+		log.Warn(fmt.Sprintf("can not add app config file source, error: %s", err))
 	}
 
 	err = Reload()
@@ -116,27 +106,28 @@ func Init() {
 	version.Ver().Log()
 }
 
-//Reload reload the all configurations
+// Reload reload the all configurations
 func Reload() error {
 	err := archaius.UnmarshalConfig(App)
 	if err != nil {
 		return err
 	}
+
 	*Server = loadServerConfig()
-	body, _ := json.MarshalIndent(archaius.GetConfigs(), "", "  ")
-	log.Info(fmt.Sprintf("finish to reload configurations\n%s", body))
+	if GetLog().LogLevel == "DEBUG" {
+		body, _ := json.MarshalIndent(archaius.GetConfigs(), "", "  ")
+		log.Debug(fmt.Sprintf("finish to reload configurations\n%s", body))
+	}
+
+	grcCfg := loadGrcConfig()
+	if grcCfg != nil {
+		App.Gov.MatchGroup = grcCfg.MatchGroup
+		App.Gov.Policies = grcCfg.Policies
+	}
 	return nil
 }
 
 func loadServerConfig() ServerConfig {
-	serviceClearInterval := GetDuration("registry.service.clearInterval", defaultServiceClearInterval, WithENV("SERVICE_CLEAR_INTERVAL"))
-	if serviceClearInterval < minServiceClearInterval || serviceClearInterval > maxServiceClearInterval {
-		serviceClearInterval = defaultServiceClearInterval
-	}
-	serviceTTL := GetDuration("registry.service.clearTTL", defaultServiceTTL, WithENV("SERVICE_TTL"))
-	if serviceTTL < minServiceTTL || serviceTTL > maxServiceTTL {
-		serviceTTL = defaultServiceTTL
-	}
 	cacheTTL := GetDuration("registry.cache.ttl", minCacheTTL, WithENV("CACHE_TTL"), WithStandby("cache_ttl"))
 	if cacheTTL < minCacheTTL {
 		cacheTTL = minCacheTTL
@@ -170,7 +161,7 @@ func loadServerConfig() ServerConfig {
 
 			EnablePProf: GetInt("server.pprof.mode", 0, WithStandby("enable_pprof")) != 0,
 
-			SslEnabled: GetInt("ssl.mode", 1, WithStandby("ssl_mode")) != 0,
+			SslEnabled: GetBool("ssl.enable", true, WithStandby("ssl_mode")),
 
 			LogRotateSize:   maxLogFileSize,
 			LogBackupCount:  maxLogBackupCount,
@@ -188,14 +179,10 @@ func loadServerConfig() ServerConfig {
 			CacheTTL:     cacheTTL,
 			SelfRegister: GetInt("registry.selfRegister", 1, WithStandby("self_register")) != 0,
 
-			ServiceClearEnabled:  GetBool("registry.service.clearEnable", false, WithENV("SERVICE_CLEAR_ENABLED")),
-			ServiceClearInterval: serviceClearInterval,
-			ServiceTTL:           serviceTTL,
-			GlobalVisible:        GetString("registry.service.globalVisible", "", WithENV("CSE_SHARED_SERVICES")),
-			InstanceTTL:          GetInt64("registry.instance.ttl", 0, WithENV("INSTANCE_TTL")),
+			GlobalVisible: GetString("registry.service.globalVisible", "", WithENV("CSE_SHARED_SERVICES")),
+			InstanceTTL:   GetInt64("registry.instance.ttl", 0, WithENV("INSTANCE_TTL")),
 
-			SchemaDisable:  GetBool("registry.schema.disable", false, WithENV("SCHEMA_DISABLE")),
-			SchemaEditable: GetBool("registry.schema.editable", false, WithENV("SCHEMA_EDITABLE")),
+			SchemaDisable: GetBool("registry.schema.disable", false, WithENV("SCHEMA_DISABLE")),
 
 			EnableRBAC: GetBool("rbac.enable", false, WithStandby("rbac_enabled")),
 		},
@@ -205,5 +192,25 @@ func loadServerConfig() ServerConfig {
 func setCPUs() {
 	cores := runtime.NumCPU()
 	runtime.GOMAXPROCS(cores)
-	log.Infof("service center is running simultaneously with %d CPU cores", cores)
+	log.Info(fmt.Sprintf("service center is running simultaneously with %d CPU cores", cores))
+}
+
+func loadGrcConfig() *Gov {
+	grcFile := filepath.Join(util.GetAppRoot(), "conf", "grc.json")
+	bytes, err := os.ReadFile(grcFile)
+	if err != nil {
+		log.Warn(fmt.Sprintf("can not add grc config file source, error: %s", err))
+		return nil
+	}
+	var policies AppConfig
+	err = json.Unmarshal(bytes, &policies)
+	if err != nil {
+		log.Error("unmarshal grc config failed", err)
+		return nil
+	}
+	if policies.Gov == nil {
+		log.Warn("no grc config load")
+		return nil
+	}
+	return policies.Gov
 }

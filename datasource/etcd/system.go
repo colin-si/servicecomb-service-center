@@ -19,46 +19,34 @@ package etcd
 
 import (
 	"context"
-	"sync"
 
-	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/mux"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	"github.com/apache/servicecomb-service-center/pkg/dump"
-	"github.com/apache/servicecomb-service-center/pkg/etcdsync"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
+	"github.com/apache/servicecomb-service-center/pkg/goutil"
+	"github.com/go-chassis/foundation/gopool"
 )
 
 type SysManager struct {
-	lockMux sync.Mutex
-	locks   map[string]*etcdsync.DLock
 }
 
-func newSysManager() datasource.SystemManager {
-	inst := &SysManager{
-		locks: make(map[string]*etcdsync.DLock),
-	}
-	return inst
-}
 func (sm *SysManager) DumpCache(ctx context.Context) *dump.Cache {
 	var cache dump.Cache
-	gopool.New(ctx, gopool.Configure().Workers(2)).
-		Do(func(_ context.Context) { setValue(kv.Store().Service(), &cache.Microservices) }).
-		Do(func(_ context.Context) { setValue(kv.Store().ServiceIndex(), &cache.Indexes) }).
-		Do(func(_ context.Context) { setValue(kv.Store().ServiceAlias(), &cache.Aliases) }).
-		Do(func(_ context.Context) { setValue(kv.Store().ServiceTag(), &cache.Tags) }).
-		Do(func(_ context.Context) { setValue(kv.Store().RuleIndex(), &cache.RuleIndexes) }).
-		Do(func(_ context.Context) { setValue(kv.Store().Rule(), &cache.Rules) }).
-		Do(func(_ context.Context) { setValue(kv.Store().DependencyRule(), &cache.DependencyRules) }).
-		Do(func(_ context.Context) { setValue(kv.Store().SchemaSummary(), &cache.Summaries) }).
-		Do(func(_ context.Context) { setValue(kv.Store().Instance(), &cache.Instances) }).
+	goutil.New(gopool.Configure().WithContext(ctx).Workers(10)).
+		Do(func(_ context.Context) { setValue(sd.Service(), &cache.Microservices) }).
+		Do(func(_ context.Context) { setValue(sd.ServiceIndex(), &cache.Indexes) }).
+		Do(func(_ context.Context) { setValue(sd.ServiceAlias(), &cache.Aliases) }).
+		Do(func(_ context.Context) { setValue(sd.ServiceTag(), &cache.Tags) }).
+		Do(func(_ context.Context) { setValue(sd.DependencyRule(), &cache.DependencyRules) }).
+		Do(func(_ context.Context) { setValue(sd.SchemaSummary(), &cache.Summaries) }).
+		Do(func(_ context.Context) { setValue(sd.Instance(), &cache.Instances) }).
 		Done()
 	return &cache
 }
 
-func setValue(e sd.Adaptor, setter dump.Setter) {
-	e.Cache().ForEach(func(k string, kv *sd.KeyValue) (next bool) {
+func setValue(e state.State, setter dump.Setter) {
+	e.Cache().ForEach(func(k string, kv *kvstore.KeyValue) (next bool) {
 		setter.SetValue(&dump.KV{
 			Key:         k,
 			Rev:         kv.ModRevision,
@@ -67,43 +55,4 @@ func setValue(e sd.Adaptor, setter dump.Setter) {
 		})
 		return true
 	})
-}
-
-func (sm *SysManager) DLock(ctx context.Context, request *datasource.DLockRequest) error {
-	var (
-		lock *etcdsync.DLock
-		err  error
-	)
-	sm.lockMux.Lock()
-
-	id := mux.Type(request.ID)
-	if request.Wait {
-		lock, err = mux.Lock(id)
-	} else {
-		lock, err = mux.Try(id)
-	}
-	if err != nil {
-		sm.lockMux.Unlock()
-		return err
-	}
-	sm.locks[request.ID] = lock
-
-	sm.lockMux.Unlock()
-	return nil
-}
-
-func (sm *SysManager) DUnlock(ctx context.Context, request *datasource.DUnlockRequest) error {
-	sm.lockMux.Lock()
-
-	lock, ok := sm.locks[request.ID]
-	if !ok {
-		sm.lockMux.Unlock()
-		return datasource.ErrDLockNotFound
-	}
-
-	err := lock.Unlock()
-	delete(sm.locks, request.ID)
-
-	sm.lockMux.Unlock()
-	return err
 }

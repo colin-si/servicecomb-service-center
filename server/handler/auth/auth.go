@@ -18,6 +18,7 @@
 package auth
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/go-chassis/cari/discovery"
@@ -32,10 +33,7 @@ import (
 	"github.com/apache/servicecomb-service-center/server/response"
 )
 
-const (
-	CtxResourceLabels util.CtxKey = "_resource_labels"
-	CtxResourceScopes util.CtxKey = "_resource_scopes"
-)
+const CtxResourceLabels util.CtxKey = "_resource_labels"
 
 type Handler struct {
 }
@@ -43,10 +41,8 @@ type Handler struct {
 func (h *Handler) Handle(i *chain.Invocation) {
 	r := i.Context().Value(rest.CtxRequest).(*http.Request)
 
-	i.WithContext(CtxResourceScopes, auth.ResourceScopes(r))
-
 	if err := auth.Identify(r); err != nil {
-		log.Errorf(err, "authenticate request failed, %s %s", r.Method, r.RequestURI)
+		log.Error(fmt.Sprintf("authenticate request failed, %s %s", r.Method, r.RequestURI), err)
 		if e, ok := err.(*errsvc.Error); ok {
 			i.Fail(e)
 			return

@@ -31,16 +31,15 @@ const (
 	RegistryInstanceKey      = "inst"
 	RegistryFile             = "files"
 	RegistryIndex            = "indexes"
-	RegistryRuleKey          = "rules"
-	RegistryRuleIndexKey     = "rule-indexes"
 	RegistryDomainKey        = "domains"
 	RegistryProjectKey       = "projects"
 	RegistryAliasKey         = "alias"
 	RegistryTagKey           = "tags"
+	RegistrySchemaRefKey     = "schema-ref"
+	RegistrySchemaContentKey = "schema-content"
 	RegistrySchemaKey        = "schemas"
 	RegistrySchemaSummaryKey = "schema-sum"
 	RegistryLeaseKey         = "leases"
-	RegistryDependencyKey    = "deps"
 	RegistryDepsRuleKey      = "dep-rules"
 	RegistryDepsQueueKey     = "dep-queue"
 	RegistryMetricsKey       = "metrics"
@@ -53,11 +52,11 @@ func GetRootKey() string {
 	return SPLIT + RegistryRootKey
 }
 
-func GenerateRBACAccountKey(name string) string {
+func GenerateDomainKey(domain string) string {
 	return util.StringJoin([]string{
 		GetRootKey(),
-		"accounts",
-		name,
+		RegistryDomainKey,
+		domain,
 	}, SPLIT)
 }
 
@@ -69,6 +68,21 @@ func GetProjectRootKey(domain string) string {
 	}, SPLIT)
 }
 
+func GenerateProjectKey(domain, project string) string {
+	return util.StringJoin([]string{
+		GetProjectRootKey(domain),
+		project,
+	}, SPLIT)
+}
+
+func GenerateRBACAccountKey(name string) string {
+	return util.StringJoin([]string{
+		GetRootKey(),
+		"accounts",
+		name,
+	}, SPLIT)
+}
+
 func GenerateRBACRoleKey(name string) string {
 	return util.StringJoin([]string{
 		GetRootKey(),
@@ -76,6 +90,7 @@ func GenerateRBACRoleKey(name string) string {
 		name,
 	}, SPLIT)
 }
+
 func GenRoleAccountIdxKey(role, account string) string {
 	return util.StringJoin([]string{
 		GetRootKey(),
@@ -83,24 +98,13 @@ func GenRoleAccountIdxKey(role, account string) string {
 		role, account,
 	}, SPLIT)
 }
+
 func GenRoleAccountPrefixIdxKey(role string) string {
 	return util.StringJoin([]string{
 		GetRootKey(),
 		"idx-role-account",
 		role,
-	}, SPLIT)
-}
-func GenerateETCDProjectKey(domain, project string) string {
-	return util.StringJoin([]string{
-		GetProjectRootKey(domain),
-		project,
-	}, SPLIT)
-}
-
-func GenerateETCDDomainKey(domain string) string {
-	return util.StringJoin([]string{
-		GetDomainRootKey(),
-		domain,
+		"",
 	}, SPLIT)
 }
 
@@ -146,24 +150,6 @@ func GetServiceAppKey(domainProject, env, appID string) string {
 	}, SPLIT)
 }
 
-func GetServiceRuleRootKey(domainProject string) string {
-	return util.StringJoin([]string{
-		GetRootKey(),
-		RegistryServiceKey,
-		RegistryRuleKey,
-		domainProject,
-	}, SPLIT)
-}
-
-func GetServiceRuleIndexRootKey(domainProject string) string {
-	return util.StringJoin([]string{
-		GetRootKey(),
-		RegistryServiceKey,
-		RegistryRuleIndexKey,
-		domainProject,
-	}, SPLIT)
-}
-
 func GetServiceTagRootKey(domainProject string) string {
 	return util.StringJoin([]string{
 		GetRootKey(),
@@ -178,6 +164,24 @@ func GetServiceSchemaRootKey(domainProject string) string {
 		GetRootKey(),
 		RegistryServiceKey,
 		RegistrySchemaKey,
+		domainProject,
+	}, SPLIT)
+}
+
+func GetServiceSchemaRefRootKey(domainProject string) string {
+	return util.StringJoin([]string{
+		GetRootKey(),
+		RegistryServiceKey,
+		RegistrySchemaRefKey,
+		domainProject,
+	}, SPLIT)
+}
+
+func GetServiceSchemaContentRootKey(domainProject string) string {
+	return util.StringJoin([]string{
+		GetRootKey(),
+		RegistryServiceKey,
+		RegistrySchemaContentKey,
 		domainProject,
 	}, SPLIT)
 }
@@ -197,15 +201,6 @@ func GetInstanceLeaseRootKey(domainProject string) string {
 		RegistryInstanceKey,
 		RegistryLeaseKey,
 		domainProject,
-	}, SPLIT)
-}
-
-func GenerateRuleIndexKey(domainProject string, serviceID string, attr string, pattern string) string {
-	return util.StringJoin([]string{
-		GetServiceRuleIndexRootKey(domainProject),
-		serviceID,
-		attr,
-		pattern,
 	}, SPLIT)
 }
 
@@ -229,18 +224,25 @@ func GenerateServiceAliasKey(key *discovery.MicroServiceKey) string {
 	}, SPLIT)
 }
 
-func GenerateServiceRuleKey(domainProject string, serviceID string, ruleID string) string {
-	return util.StringJoin([]string{
-		GetServiceRuleRootKey(domainProject),
-		serviceID,
-		ruleID,
-	}, SPLIT)
-}
-
 func GenerateServiceTagKey(domainProject string, serviceID string) string {
 	return util.StringJoin([]string{
 		GetServiceTagRootKey(domainProject),
 		serviceID,
+	}, SPLIT)
+}
+
+func GenerateServiceSchemaRefKey(domainProject string, serviceID string, schemaID string) string {
+	return util.StringJoin([]string{
+		GetServiceSchemaRefRootKey(domainProject),
+		serviceID,
+		schemaID,
+	}, SPLIT)
+}
+
+func GenerateServiceSchemaContentKey(domainProject string, hash string) string {
+	return util.StringJoin([]string{
+		GetServiceSchemaContentRootKey(domainProject),
+		hash,
 	}, SPLIT)
 }
 
@@ -292,14 +294,6 @@ func GenerateServiceDependencyRuleKey(serviceType string, domainProject string, 
 			serviceType,
 		}, SPLIT)
 	}
-	if in.ServiceName == "*" {
-		return util.StringJoin([]string{
-			GetServiceDependencyRuleRootKey(domainProject),
-			serviceType,
-			in.Environment,
-			in.ServiceName,
-		}, SPLIT)
-	}
 	return util.StringJoin([]string{
 		GetServiceDependencyRuleRootKey(domainProject),
 		serviceType,
@@ -344,28 +338,6 @@ func GenerateConsumerDependencyQueueKey(domainProject, consumerID, uuid string) 
 	}, SPLIT)
 }
 
-func GetServiceDependencyRootKey(domainProject string) string {
-	return util.StringJoin([]string{
-		GetRootKey(),
-		RegistryServiceKey,
-		RegistryDependencyKey,
-		domainProject,
-	}, SPLIT)
-}
-
-func GetDomainRootKey() string {
-	return util.StringJoin([]string{
-		GetRootKey(),
-		RegistryDomainKey,
-	}, SPLIT)
-}
-
-func GenerateDomainKey(domain string) string {
-	return util.StringJoin([]string{
-		GetDomainRootKey(),
-		domain,
-	}, SPLIT)
-}
 func GenerateAccountKey(name string) string {
 	return util.StringJoin([]string{
 		GetRootKey(),
@@ -373,12 +345,22 @@ func GenerateAccountKey(name string) string {
 		name,
 	}, SPLIT)
 }
+
+func GenerateAccountLockKey(key string) string {
+	return util.StringJoin([]string{
+		GetRootKey(),
+		"account-locks",
+		key,
+	}, SPLIT)
+}
+
 func GenerateRBACSecretKey() string {
 	return util.StringJoin([]string{
 		GetRootKey(),
 		"rbac/secret",
 	}, SPLIT)
 }
+
 func GetServerInfoKey() string {
 	return util.StringJoin([]string{
 		GetRootKey(),
@@ -399,12 +381,5 @@ func GenerateMetricsKey(name, utc, domain string) string {
 		name,
 		utc,
 		domain,
-	}, SPLIT)
-}
-
-func GenerateProjectKey(domain, project string) string {
-	return util.StringJoin([]string{
-		GetProjectRootKey(domain),
-		project,
 	}, SPLIT)
 }

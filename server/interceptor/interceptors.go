@@ -18,9 +18,9 @@
 package interceptor
 
 import (
+	"fmt"
 	"net/http"
 
-	errorsEx "github.com/apache/servicecomb-service-center/pkg/errors"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 )
@@ -50,7 +50,7 @@ func RegisterInterceptFunc(intc Intercept) {
 		function: intc,
 	})
 
-	log.Infof("Intercept %s", intc.Name())
+	log.Info(fmt.Sprintf("Intercept %s", intc.Name()))
 }
 
 func InvokeInterceptors(w http.ResponseWriter, req *http.Request) (err error) {
@@ -58,9 +58,7 @@ func InvokeInterceptors(w http.ResponseWriter, req *http.Request) (err error) {
 	defer func() {
 		if itf := recover(); itf != nil {
 			log.Panic(itf)
-
-			err = errorsEx.Internal(itf)
-
+			err = fmt.Errorf("%v", itf)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}()

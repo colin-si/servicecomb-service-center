@@ -23,60 +23,66 @@ import (
 
 	"github.com/apache/servicecomb-service-center/pkg/privacy"
 	scrypt "github.com/elithrar/simple-scrypt"
-	"github.com/go-chassis/foundation/stringutil"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/pbkdf2"
 )
 
-func TestHashPassword(t *testing.T) {
-	h, _ := privacy.HashPassword("test")
-	t.Log(h)
-	mac, _ := privacy.ScryptPassword("test")
-	t.Log(mac)
-
-	t.Run("given old hash result, should be compatible", func(t *testing.T) {
-		same := privacy.SamePassword(h, "test")
-		assert.True(t, same)
-	})
-
-	sameMac := privacy.SamePassword(mac, "test")
-	assert.True(t, sameMac)
-
-	t.Run("use different params for scrypt, should be compatible", func(t *testing.T) {
-		h2, _ := scrypt.GenerateFromPassword([]byte("test"), scrypt.Params{N: 1024, R: 8, P: 1, SaltLen: 8, DKLen: 32})
-		same := privacy.SamePassword(stringutil.Bytes2str(h2), "test")
-		assert.True(t, same)
-	})
+type mockPassword struct {
 }
-func BenchmarkBcrypt(b *testing.B) {
-	h, _ := privacy.HashPassword("test")
+
+func (m mockPassword) EncryptPassword(pwd string) (string, error) {
+	return "encrypt password", nil
+}
+
+func (m mockPassword) CheckPassword(hashedPwd, pwd string) bool {
+	return true
+}
+
+func BenchmarkSamePassword(b *testing.B) {
+	h, _ := privacy.ScryptPassword("test")
 	for i := 0; i < b.N; i++ {
 		same := privacy.SamePassword(h, "test")
 		if !same {
-			panic("")
+			b.Fatal()
 		}
 
 	}
 	b.ReportAllocs()
 }
-func BenchmarkScrypt(b *testing.B) {
+func BenchmarkSamePasswordP500(b *testing.B) {
 	h, _ := privacy.ScryptPassword("test")
-	for i := 0; i < b.N; i++ {
-		same := privacy.SamePassword(h, "test")
-		if !same {
-			panic("")
-		}
-
-	}
-	b.ReportAllocs()
-}
-func BenchmarkScryptP(b *testing.B) {
-	h, _ := privacy.ScryptPassword("test")
+	b.SetParallelism(500)
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			same := privacy.SamePassword(h, "test")
 			if !same {
-				panic("")
+				b.Fatal()
+			}
+		}
+	})
+	b.ReportAllocs()
+}
+func BenchmarkSamePasswordP1000(b *testing.B) {
+	h, _ := privacy.ScryptPassword("test")
+	b.SetParallelism(1000)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			same := privacy.SamePassword(h, "test")
+			if !same {
+				b.Fatal()
+			}
+		}
+	})
+	b.ReportAllocs()
+}
+func BenchmarkSamePasswordP5000(b *testing.B) {
+	h, _ := privacy.ScryptPassword("test")
+	b.SetParallelism(5000)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			same := privacy.SamePassword(h, "test")
+			if !same {
+				b.Fatal()
 			}
 		}
 	})
@@ -116,4 +122,15 @@ func BenchmarkPbkdf2(b *testing.B) {
 		}
 	})
 	b.ReportAllocs()
+}
+func TestDefaultManager(t *testing.T) {
+	currentManager := privacy.DefaultManager
+	privacy.DefaultManager = &mockPassword{}
+	defer func() {
+		privacy.DefaultManager = currentManager
+	}()
+	password, _ := privacy.DefaultManager.EncryptPassword("")
+	assert.Equal(t, "encrypt password", password)
+	samePassword := privacy.DefaultManager.CheckPassword("", "")
+	assert.True(t, samePassword)
 }

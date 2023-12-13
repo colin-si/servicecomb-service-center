@@ -59,7 +59,7 @@ func (s *BusService) newBus(t Type) *Bus {
 
 func (s *BusService) Start() {
 	if !s.Closed() {
-		log.Warnf("notify service is already running")
+		log.Warn("notify service is already running")
 		return
 	}
 	s.mux.Lock()
@@ -72,19 +72,19 @@ func (s *BusService) Start() {
 		log.Error("", err)
 	}
 
-	log.Debugf("notify service is started")
+	log.Debug("notify service is started")
 }
 
 func (s *BusService) AddSubscriber(n Subscriber) error {
 	if n == nil {
 		err := errors.New("required Subscriber")
-		log.Errorf(err, "add subscriber failed")
+		log.Error("add subscriber failed", err)
 		return err
 	}
 
 	if !n.Type().IsValid() {
 		err := errors.New("unknown subscribe type")
-		log.Errorf(err, "add %s subscriber[%s/%s] failed", n.Type(), n.Subject(), n.Group())
+		log.Error(fmt.Sprintf("add %s subscriber[%s/%s] failed", n.Type(), n.Subject(), n.Group()), err)
 		return err
 	}
 
@@ -118,7 +118,7 @@ func (s *BusService) closeBuses() {
 	s.mux.RUnlock()
 }
 
-//通知内容塞到队列里
+// 通知内容塞到队列里
 func (s *BusService) Fire(evt Event) error {
 	if s.Closed() {
 		return errors.New("add notify evt failed for server shutdown")
@@ -128,7 +128,7 @@ func (s *BusService) Fire(evt Event) error {
 	bus, ok := s.buses[evt.Type()]
 	if !ok {
 		s.mux.RUnlock()
-		return fmt.Errorf("unknown event type[%s]", evt.Type())
+		return fmt.Errorf("no %s subscriber on this service center", evt.Type())
 	}
 	s.mux.RUnlock()
 	bus.Fire(evt)

@@ -18,8 +18,11 @@
 package schema
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -27,9 +30,14 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+var (
+	ErrInvalidInstanceIP = errors.New("invalid HTTP Header X-InstanceIP")
+)
+
 type Mux struct {
 	// Disable represents frontend proxy service api or not
-	Disable bool
+	Disable        bool
+	SchemaTestCIDR *net.IPNet
 }
 
 func (m *Mux) SchemaHandleFunc(c echo.Context) (err error) {
@@ -41,15 +49,19 @@ func (m *Mux) SchemaHandleFunc(c echo.Context) (err error) {
 
 	r := c.Request()
 
-	//	protocol:= r.Header.Get("X-InstanceProtocol")
-	//	sslActive:=r.Header.Get("X-InstanceSSL")
 	var (
 		response   *http.Response
 		req        *http.Request
 		instanceIP = r.Header.Get("X-InstanceIP")
-		requestUrl = strings.Replace(r.RequestURI, "testSchema/", "", 1)
-		url        = "http://" + instanceIP + requestUrl
+		requestURL = strings.Replace(r.RequestURI, "testSchema/", "", 1)
+		url        = "http://" + instanceIP + requestURL
 	)
+
+	if err := m.checkInstanceHost(instanceIP); err != nil {
+		c.Response().WriteHeader(http.StatusForbidden)
+		_, _ = c.Response().Write([]byte(err.Error()))
+		return err
+	}
 
 	switch r.Method {
 	case "GET":
@@ -61,14 +73,19 @@ func (m *Mux) SchemaHandleFunc(c echo.Context) (err error) {
 	case "DELETE":
 		req, err = http.NewRequest(http.MethodDelete, url, r.Body)
 	default:
-		c.String(http.StatusNotFound, "Method not found")
+		oerr := c.String(http.StatusNotFound, "Method not found")
+		if oerr != nil {
+			log.Printf("Error: %s\n", oerr)
+		}
 		return
-
 	}
 
 	if err != nil {
-		c.String(http.StatusInternalServerError,
+		oerr := c.String(http.StatusInternalServerError,
 			fmt.Sprintf("( Error while creating request due to : %s", err))
+		if oerr != nil {
+			log.Printf("Error: %s\n", oerr)
+		}
 		return
 	}
 
@@ -86,17 +103,37 @@ func (m *Mux) SchemaHandleFunc(c echo.Context) (err error) {
 	client := http.Client{Timeout: time.Second * 20}
 	response, err = client.Do(req)
 	if err != nil {
-		c.String(http.StatusNotFound,
+		oerr := c.String(http.StatusNotFound,
 			fmt.Sprintf("( Error while sending request due to : %s", err))
+		if oerr != nil {
+			log.Printf("Error: %s\n", oerr)
+		}
 		return
 	}
-	respBody, err := ioutil.ReadAll(response.Body)
+	respBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		c.String(http.StatusNotFound,
+		oerr := c.String(http.StatusNotFound,
 			fmt.Sprintf("(could not fetch response body for error %s", err))
+		if oerr != nil {
+			log.Printf("Error: %s\n", oerr)
+		}
 		return
 	}
 
-	c.String(http.StatusOK, string(respBody))
+	oerr := c.String(http.StatusOK, string(respBody))
+	if oerr != nil {
+		log.Printf("Error: %s\n", oerr)
+	}
+	return nil
+}
+
+func (m *Mux) checkInstanceHost(instanceIP string) error {
+	host, _, err := net.SplitHostPort(instanceIP)
+	if err != nil {
+		return err
+	}
+	if !m.SchemaTestCIDR.Contains(net.ParseIP(host)) {
+		return ErrInvalidInstanceIP
+	}
 	return nil
 }

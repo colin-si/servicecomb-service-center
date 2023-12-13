@@ -19,40 +19,38 @@ package server
 
 import (
 	"context"
-	"net"
+	"crypto/tls"
 	"os"
-	"strings"
-	"time"
 
-	"github.com/apache/servicecomb-service-center/server/event"
+	"github.com/apache/servicecomb-service-center/server/middleware"
+	"github.com/apache/servicecomb-service-center/server/resource/disco"
+	"github.com/gofiber/fiber/v2"
+
+	"github.com/go-chassis/go-chassis/v2"
+	chassisServer "github.com/go-chassis/go-chassis/v2/core/server"
 
 	"github.com/apache/servicecomb-service-center/datasource"
 	nf "github.com/apache/servicecomb-service-center/pkg/event"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
 	"github.com/apache/servicecomb-service-center/pkg/log"
-	"github.com/apache/servicecomb-service-center/pkg/metrics"
 	"github.com/apache/servicecomb-service-center/pkg/plugin"
 	"github.com/apache/servicecomb-service-center/pkg/signal"
-	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/apache/servicecomb-service-center/server/alarm"
 	"github.com/apache/servicecomb-service-center/server/command"
 	"github.com/apache/servicecomb-service-center/server/config"
-	"github.com/apache/servicecomb-service-center/server/core"
+	"github.com/apache/servicecomb-service-center/server/event"
 	"github.com/apache/servicecomb-service-center/server/plugin/security/tlsconf"
-	"github.com/apache/servicecomb-service-center/server/service/gov"
+	"github.com/apache/servicecomb-service-center/server/service/grc"
 	"github.com/apache/servicecomb-service-center/server/service/rbac"
-	snf "github.com/apache/servicecomb-service-center/server/syncernotify"
+	"github.com/go-chassis/foundation/gopool"
 )
 
-const defaultCollectPeriod = 30 * time.Second
-
-var server ServiceCenterServer
+var sc ServiceCenterServer
 
 func Run() {
 	if err := command.ParseConfig(os.Args); err != nil {
 		log.Fatal(err.Error(), err)
 	}
-
-	server.Run()
+	sc.Run()
 }
 
 type endpoint struct {
@@ -61,12 +59,9 @@ type endpoint struct {
 }
 
 type ServiceCenterServer struct {
-	REST endpoint
-	GRPC endpoint
-
-	apiService          *APIServer
-	eventCenter         *nf.BusService
-	syncerNotifyService *snf.Service
+	Endpoint    endpoint
+	APIServer   *APIServer
+	eventCenter *nf.BusService
 }
 
 func (s *ServiceCenterServer) Run() {
@@ -74,15 +69,42 @@ func (s *ServiceCenterServer) Run() {
 
 	s.startServices()
 
+	s.startChassis()
+
 	signal.RegisterListener()
 
 	s.waitForQuit()
 }
 
+func (s *ServiceCenterServer) startChassis() {
+	go func() {
+		mask := make([]string, 0)
+		if !config.GetBool("server.turbo", false) {
+			log.Info("turbo is disabled")
+			mask = append(mask, "rest")
+		} else {
+			app := fiber.New(fiber.Config{})
+
+			app.Use(middleware.PrepareContextFor)
+
+			app.Post("/v4/:project/registry/microservices/:serviceId/instances",
+				disco.FiberRegisterInstance)
+			app.Put("/v4/:project/registry/microservices/:serviceId/instances/:instanceId/heartbeat",
+				disco.FiberSendHeartbeat)
+			app.Get("/v4/:project/registry/instances", disco.FiberFindInstances)
+			chassis.RegisterSchema("rest", app)
+			log.Info("turbo is enabled")
+		}
+		if err := chassis.Run(chassisServer.WithServerMask(mask...)); err != nil {
+			log.Warn(err.Error())
+		}
+	}()
+}
+
 func (s *ServiceCenterServer) waitForQuit() {
-	err := <-s.apiService.Err()
+	err := <-s.APIServer.Err()
 	if err != nil {
-		log.Errorf(err, "service center catch errors")
+		log.Error("service center catch errors", err)
 	}
 
 	s.Stop()
@@ -90,71 +112,58 @@ func (s *ServiceCenterServer) waitForQuit() {
 
 func (s *ServiceCenterServer) initialize() {
 	s.initEndpoints()
-	// Metrics
-	s.initMetrics()
 	// SSL
 	s.initSSL()
 	// Datasource
 	s.initDatasource()
-	s.apiService = GetAPIServer()
+	s.APIServer = GetAPIServer()
 	s.eventCenter = event.Center()
-	s.syncerNotifyService = snf.GetSyncerNotifyCenter()
 }
 
 func (s *ServiceCenterServer) initEndpoints() {
-	s.REST.Host = config.GetString("server.host", "", config.WithStandby("httpaddr"))
-	s.REST.Port = config.GetString("server.port", "", config.WithStandby("httpport"))
-	s.GRPC.Host = config.GetString("server.rpc.host", "", config.WithStandby("rpcaddr"))
-	s.GRPC.Port = config.GetString("server.rpc.port", "", config.WithStandby("rpcport"))
+	s.Endpoint.Host = config.GetString("server.host", "127.0.0.1", config.WithStandby("httpaddr"))
+	s.Endpoint.Port = config.GetString("server.port", "30100", config.WithStandby("httpport"))
 }
 
 func (s *ServiceCenterServer) initDatasource() {
 	// init datasource
-	kind := datasource.Kind(config.GetString("registry.kind", "", config.WithStandby("registry_plugin")))
+	kind := config.GetString("registry.kind", "", config.WithStandby("registry_plugin"))
+	tlsConfig, err := getDatasourceTLSConfig()
+	if err != nil {
+		log.Fatal("get datasource tlsConfig failed", err)
+	}
 	if err := datasource.Init(datasource.Options{
-		Kind:           kind,
-		SslEnabled:     config.GetSSL().SslEnabled,
-		InstanceTTL:    config.GetRegistry().InstanceTTL,
-		SchemaEditable: config.GetRegistry().SchemaEditable,
+		Kind:       kind,
+		Logger:     log.Logger,
+		SslEnabled: config.GetSSL().SslEnabled,
+		TLSConfig:  tlsConfig,
+		ConnectedFunc: func() {
+			err := alarm.Clear(alarm.IDBackendConnectionRefuse)
+			if err != nil {
+				log.Error("", err)
+			}
+		},
+		ErrorFunc: func(err error) {
+			if err == nil {
+				return
+			}
+			err = alarm.Raise(alarm.IDBackendConnectionRefuse, alarm.AdditionalContext("%v", err))
+			if err != nil {
+				log.Error("", err)
+			}
+		},
+		EnableCache: config.GetRegistry().EnableCache,
+		InstanceTTL: config.GetRegistry().InstanceTTL,
 	}); err != nil {
 		log.Fatal("init datasource failed", err)
 	}
 }
 
-func (s *ServiceCenterServer) initMetrics() {
-	if !config.GetMetrics().Enable {
-		return
+func getDatasourceTLSConfig() (*tls.Config, error) {
+	if config.GetSSL().SslEnabled {
+		return tlsconf.ClientConfig()
 	}
-	interval, err := time.ParseDuration(strings.TrimSpace(config.GetMetrics().Interval))
-	if err != nil {
-		log.Errorf(err, "invalid metrics config[interval], set default %s", defaultCollectPeriod)
-	}
-	if interval <= time.Second {
-		interval = defaultCollectPeriod
-	}
-	var instance string
-	if len(s.REST.Host) > 0 {
-		instance = net.JoinHostPort(s.REST.Host, s.REST.Port)
-	} else {
-		if len(s.GRPC.Host) > 0 {
-			instance = net.JoinHostPort(s.GRPC.Host, s.GRPC.Port)
-		} else {
-			log.Fatal("init metrics InstanceName failed", nil)
-		}
-	}
-
-	if err := metrics.Init(metrics.Options{
-		Interval:     interval,
-		InstanceName: instance,
-		SysMetrics: []string{
-			"process_resident_memory_bytes",
-			"process_cpu_seconds_total",
-			"go_threads",
-			"go_goroutines",
-		},
-	}); err != nil {
-		log.Fatal("init metrics failed", err)
-	}
+	return nil, nil
 }
 
 func (s *ServiceCenterServer) initSSL() {
@@ -184,16 +193,10 @@ func (s *ServiceCenterServer) startServices() {
 	// notifications
 	s.eventCenter.Start()
 
-	// notify syncer
-	syncerEnabled := config.GetBool("syncer.enabled", false)
-	if syncerEnabled {
-		s.syncerNotifyService.Start()
-	}
-
-	// load server plugins
+	// load sc plugins
 	plugin.LoadPlugins()
 	rbac.Init()
-	if err := gov.Init(); err != nil {
+	if err := grc.Init(); err != nil {
 		log.Fatal("init gov failed", err)
 	}
 	// check version
@@ -207,27 +210,21 @@ func (s *ServiceCenterServer) startServices() {
 }
 
 func (s *ServiceCenterServer) startAPIService() {
-	core.Instance.HostName = util.HostName()
-	s.apiService.AddListener(REST, s.REST.Host, s.REST.Port)
-	s.apiService.AddListener(RPC, s.REST.Host, s.GRPC.Port)
-	s.apiService.Start()
+	s.APIServer.SetHostPort(s.Endpoint.Host, s.Endpoint.Port)
+	s.APIServer.Start()
 }
 
 func (s *ServiceCenterServer) Stop() {
-	if s.apiService != nil {
-		s.apiService.Stop()
+	if s.APIServer != nil {
+		s.APIServer.Stop()
 	}
 
 	if s.eventCenter != nil {
 		s.eventCenter.Stop()
 	}
 
-	if s.syncerNotifyService != nil {
-		s.syncerNotifyService.Stop()
-	}
-
 	gopool.CloseAndWait()
 
-	log.Warnf("service center stopped")
-	log.Sync()
+	log.Warn("service center stopped")
+	log.Flush()
 }

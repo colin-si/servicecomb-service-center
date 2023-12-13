@@ -14,25 +14,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package v3
 
 import (
 	"net/http"
 
 	"github.com/apache/servicecomb-service-center/pkg/rest"
-	v4 "github.com/apache/servicecomb-service-center/server/rest/controller/v4"
+	v4 "github.com/apache/servicecomb-service-center/server/resource/disco"
 )
 
 type SchemaService struct {
-	v4.SchemaService
+	v4.SchemaResource
 }
 
-func (this *SchemaService) URLPatterns() []rest.Route {
+func (s *SchemaService) URLPatterns() []rest.Route {
 	return []rest.Route{
-		{http.MethodGet, "/registry/v3/microservices/:serviceId/schemas/:schemaId", this.GetSchemas},
-		{http.MethodPut, "/registry/v3/microservices/:serviceId/schemas/:schemaId", this.ModifySchema},
-		{http.MethodDelete, "/registry/v3/microservices/:serviceId/schemas/:schemaId", this.DeleteSchemas},
-		{http.MethodPost, "/registry/v3/microservices/:serviceId/schemas", this.ModifySchemas},
-		{http.MethodGet, "/registry/v3/microservices/:serviceId/schemas", this.GetAllSchemas},
+		{Method: http.MethodGet, Path: "/registry/v3/microservices/:serviceId/schemas/:schemaId", Func: s.GetSchema},
+		{Method: http.MethodPut, Path: "/registry/v3/microservices/:serviceId/schemas/:schemaId", Func: s.PutSchema},
+		{Method: http.MethodDelete, Path: "/registry/v3/microservices/:serviceId/schemas/:schemaId", Func: s.DeleteSchema},
+		{Method: http.MethodPost, Path: "/registry/v3/microservices/:serviceId/schemas", Func: s.PutSchemas},
+		{Method: http.MethodGet, Path: "/registry/v3/microservices/:serviceId/schemas", Func: s.ListSchema},
 	}
 }

@@ -31,19 +31,21 @@ func TestGenerateRBACAccountKey(t *testing.T) {
 }
 
 func TestGenerateETCDProjectKey(t *testing.T) {
-	assert.Equal(t, "/cse-sr/projects/domain/project", path.GenerateETCDProjectKey("domain", "project"))
+	assert.Equal(t, "/cse-sr/projects/domain/project", path.GenerateProjectKey("domain", "project"))
 }
 
 func TestGenerateETCDDomainKey(t *testing.T) {
-	assert.Equal(t, "/cse-sr/domains/domain", path.GenerateETCDDomainKey("domain"))
+	assert.Equal(t, "/cse-sr/domains/domain", path.GenerateDomainKey("domain"))
 }
 
 func TestGenerateAccountKey(t *testing.T) {
 	assert.Equal(t, "/cse-sr/accounts/admin", path.GenerateAccountKey("admin"))
 }
+
 func TestGenerateAccountSecretKey(t *testing.T) {
 	assert.Equal(t, "/cse-sr/rbac/secret", path.GenerateRBACSecretKey())
 }
+
 func TestGenerateDependencyRuleKey(t *testing.T) {
 	// consumer
 	k := path.GenerateConsumerDependencyRuleKey("a", nil)
@@ -57,13 +59,6 @@ func TestGenerateDependencyRuleKey(t *testing.T) {
 		Version:     "4",
 	})
 	assert.Equal(t, "/cse-sr/ms/dep-rules/a/c/1/2/3/4", k)
-	k = path.GenerateConsumerDependencyRuleKey("a", &discovery.MicroServiceKey{
-		Environment: "1",
-		AppId:       "2",
-		ServiceName: "*",
-		Version:     "4",
-	})
-	assert.Equal(t, "/cse-sr/ms/dep-rules/a/c/1/*", k)
 
 	// provider
 	k = path.GenerateProviderDependencyRuleKey("a", nil)
@@ -76,12 +71,4 @@ func TestGenerateDependencyRuleKey(t *testing.T) {
 		Version:     "4",
 	})
 	assert.Equal(t, "/cse-sr/ms/dep-rules/a/p/1/2/3/4", k)
-
-	k = path.GenerateProviderDependencyRuleKey("a", &discovery.MicroServiceKey{
-		Environment: "1",
-		AppId:       "2",
-		ServiceName: "*",
-		Version:     "4",
-	})
-	assert.Equal(t, "/cse-sr/ms/dep-rules/a/p/1/*", k)
 }

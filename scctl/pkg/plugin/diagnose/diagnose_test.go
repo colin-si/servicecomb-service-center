@@ -1,17 +1,19 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package diagnose
 
@@ -20,8 +22,8 @@ import (
 	"testing"
 
 	"github.com/apache/servicecomb-service-center/pkg/dump"
-	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/go-chassis/cari/discovery"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
 func TestNewDiagnoseCommand(t *testing.T) {
@@ -57,7 +59,7 @@ func TestNewDiagnoseCommand(t *testing.T) {
 	}
 
 	//for {
-	err, details := diagnose(&dump.Cache{Microservices: services, Instances: instances}, etcdResponse{service: kvs})
+	details, err := diagnose(&dump.Cache{Microservices: services, Instances: instances}, etcdResponse{service: kvs})
 	if err == nil || len(details) == 0 {
 		t.Fatalf("TestNewDiagnoseCommand failed")
 	}

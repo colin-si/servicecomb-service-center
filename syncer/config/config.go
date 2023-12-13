@@ -18,87 +18,62 @@
 package config
 
 import (
-	"io/ioutil"
-	"os"
+	"fmt"
 	"path/filepath"
-	"strconv"
-
-	"errors"
 
 	"github.com/apache/servicecomb-service-center/pkg/log"
-	"github.com/apache/servicecomb-service-center/syncer/pkg/utils"
-	"gopkg.in/yaml.v2"
-	"k8s.io/apimachinery/pkg/util/uuid"
+	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/go-chassis/go-archaius"
 )
 
-// DefaultConfig returns the default config
-func DefaultConfig() *Config {
-	hostname, err := os.Hostname()
-	if err != nil {
-		log.Errorf(err, "Error determining hostname: %s", err)
-		hostname = string(uuid.NewUUID())
-	}
+var config Config
 
-	return &Config{
-		Mode:    ModeSingle,
-		Node:    hostname,
-		DataDir: defaultDataDir + hostname,
-		Listener: Listener{
-			BindAddr: "0.0.0.0:" + strconv.Itoa(defaultBindPort),
-			RPCAddr:  "0.0.0.0:" + strconv.Itoa(defaultRPCPort),
-			PeerAddr: "127.0.0.1:" + strconv.Itoa(defaultPeerPort),
-		},
-		Task: Task{
-			Kind: "ticker",
-			Params: []Label{
-				{
-					Key:   defaultTaskKey,
-					Value: defaultTaskValue,
-				},
-			},
-		},
-		Registry: Registry{
-			Address: "http://127.0.0.1:30100",
-			Plugin:  defaultDCPluginName,
-		},
-	}
+type Config struct {
+	Sync *Sync `yaml:"sync"`
 }
 
-// LoadConfig loads configuration from file
-func LoadConfig(filepath string) (*Config, error) {
-	if filepath == "" {
-		return nil, nil
-	}
-	if !(utils.IsFileExist(filepath)) {
-		err := errors.New("file is not exist")
-		log.Errorf(err, "Load config from %s failed", filepath)
-		return nil, err
-	}
-
-	byteArr, err := ioutil.ReadFile(filepath)
-	if err != nil {
-		log.Errorf(err, "Load config from %s failed", filepath)
-		return nil, err
-	}
-
-	conf := &Config{}
-	err = yaml.Unmarshal(byteArr, conf)
-	if err != nil {
-		log.Errorf(err, "Unmarshal config file failed, content is %s", byteArr)
-		return nil, err
-	}
-	return conf, nil
+type Sync struct {
+	EnableOnStart bool    `yaml:"enableOnStart"`
+	Peers         []*Peer `yaml:"peers"`
 }
 
-func (c *Config) GetTLSConfig(name string) *TLSConfig {
-	return findInTLSConfigs(c.TLSConfigs, name)
+type Peer struct {
+	Name      string   `yaml:"name"`
+	Kind      string   `yaml:"kind"`
+	Endpoints []string `yaml:"endpoints"`
+	Mode      []string `yaml:"mode"`
 }
 
-func pathFromSSLEnvOrDefault(server, path string) string {
-	env := os.Getenv(defaultEnvSSLRoot)
-	if len(env) == 0 {
-		wd, _ := os.Getwd()
-		return filepath.Join(wd, defaultCertsDir, server, path)
+func Init() error {
+	err := archaius.AddFile(filepath.Join(util.GetAppRoot(), "conf", "syncer.yaml"))
+	if err != nil {
+		log.Warn(fmt.Sprintf("can not add syncer config file source, error: %s", err))
+		return err
 	}
-	return os.ExpandEnv(filepath.Join("$"+defaultEnvSSLRoot, server, path))
+
+	err = Reload()
+	if err != nil {
+		log.Fatal("reload syncer configs failed", err)
+		return err
+	}
+	return nil
+}
+
+// Reload all configurations
+func Reload() error {
+	err := archaius.UnmarshalConfig(&config)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetConfig return the syncer full configurations
+func GetConfig() Config {
+	return config
+}
+
+// SetConfig for UT
+func SetConfig(c Config) {
+	config = c
 }

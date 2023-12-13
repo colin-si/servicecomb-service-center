@@ -39,10 +39,9 @@ server:
     ipLookups: RemoteAddr,X-Forwarded-For,X-Real-IP
 
 gov:
-  plugins:
-    - name: kie
-      type: kie
-      endpoint: http://127.0.0.1:30110
+  kie:
+    type: kie
+    endpoint: http://127.0.0.1:30110
 
 log:
   # DEBUG, INFO, WARN, ERROR, FATAL
@@ -71,7 +70,7 @@ cipher:
 ssl:
   dir:
   # ssl.mode enable ssl or not, set 1 if enable
-  mode: 0
+  enable: false
   # minimal tls protocol, [TLSv1.0, TLSv1.1, TLSv1.2]
   minVersion: TLSv1.2
   # ssl.verifyClient enable verify client certification CN
@@ -106,7 +105,7 @@ registry:
       # endpoints: sc-0=http://127.0.0.1:2380
       # if registry_plugin equals to 'etcd', then
       # endpoints: 127.0.0.1:2379
-      endpoints: 127.0.0.1:2379
+      endpoints: http://127.0.0.1:2379
     # the timeout for failing to establish a connection
     connect:
       timeout: 10s
@@ -116,11 +115,7 @@ registry:
   mongo:
     cluster:
       uri: mongodb://127.0.0.1:27017
-      sslEnabled: false
-      rootCAFile: /opt/ssl/ca.pem
-      verifyPeer: false
-      certFile: /opt/ssl/client.crt
-      keyFile: /opt/ssl/client.key
+      poolSize: 1000
   fastRegistration:
     # this config is only support in mongo case now
     # if fastRegister.queueSize is > 0, enable to fast register instance, else register instance in normal case
@@ -129,21 +124,36 @@ registry:
     queueSize: 0
 
   service:
-    # enable the job clear the microservices which deploy no instance
-    clearEnable: false
-    # the interval of job
-    clearInterval: 12h
-    # the duration between current datetime and microservice created datetime
-    clearTTL: 24h
+    # globalVisible is the global microservice name list
     globalVisible:
+    # retire the 'reserve' latest versions for each of service,
+    # delete other versions which doesn't register any instances.
+    retire:
+      disable: false
+      cron: '0 1 * * *'
+      reserve: 3
   instance:
+    # the endpoint as the service-center's endpoint instead of server.host
+    endpoint:
+    # By default, instance TTL = (times + 1) * interval
+    # if ttl > 0, the instance will always set this value, ignore the API request body
     ttl:
+    # the allowable minimum value of instance heartbeat interval
+    # if interval < minInterval, instance TTL still set with minInterval
+    minInterval: 5s
+    datacenter:
+      name:
+      region:
+      availableZone:
+    # inner properties params for instance, sc will always append these to instance properties
+    properties:
 
   schema:
     # if want disable Test Schema, SchemaDisable set true
     disable: false
-    # if want disable modification of Schema in production environment, SchemaEditable set false
-    editable: false
+    # remove the schema without refs every 7d
+    retire:
+      cron: '0 2 * * *'
   # enable to register sc itself when startup
   selfRegister: 1
 
@@ -157,11 +167,21 @@ rbac:
   enable: false
   privateKeyFile: ./private.key
   publicKeyFile: ./public.key
+  releaseLockAfter: 15m # failure login attempt causes account blocking, that is block duration
+  retainLockHistoryFor: 20m # the ttl of lock history
+  # specify auth resource scope, can be account,role,service,service/schema,...
+  # The authenticator skip the authentication of the request, if the resource type of the request is not specified in the scope
+  # The authenticator always authenticate the request with the HTTP Header 'Authorization'.
+  scope: '*'
 
 metrics:
+  # enable to start metrics gather
   enable: true
   interval: 30s
   exporter: prometheus
+  prometheus:
+    # optional, listen another ip-port and path if set, e.g. http://127.0.0.1:80/other
+    listenURL:
 
 tracing:
   kind:
@@ -169,6 +189,7 @@ tracing:
     collector:
       # type should be file or server
       type:
+      # the tracing file save dir path
       path:
       endpoint:
     sampler:
@@ -183,8 +204,6 @@ quota:
       limit: 150000
     schema:
       limit: 100
-    rule:
-      limit: 100
     tag:
       limit: 100
     account:
@@ -198,11 +217,9 @@ uuid:
 auth:
   kind:
 
+
 auditlog:
   kind:
-
-syncer:
-  enabled: false
 
 heartbeat:
   # configuration of websocket long connection

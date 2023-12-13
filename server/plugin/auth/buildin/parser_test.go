@@ -18,41 +18,46 @@
 package buildin_test
 
 import (
-	discosvc "github.com/apache/servicecomb-service-center/server/service/disco"
-	_ "github.com/apache/servicecomb-service-center/test"
-
 	"context"
 	"net/http"
 	"strings"
 	"testing"
 
+	_ "github.com/apache/servicecomb-service-center/test"
+
 	"github.com/apache/servicecomb-service-center/pkg/rest"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/plugin/auth"
 	"github.com/apache/servicecomb-service-center/server/plugin/auth/buildin"
-	"github.com/apache/servicecomb-service-center/server/service/rbac"
+	discosvc "github.com/apache/servicecomb-service-center/server/service/disco"
+	rbacsvc "github.com/apache/servicecomb-service-center/server/service/rbac"
 	"github.com/go-chassis/cari/discovery"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestGetAPIParseFunc(t *testing.T) {
-	rbac.InitResourceMap()
+	rbacsvc.InitResourceMap()
 
 	var serviceIDA, serviceIDB string
+	ctx := context.Background()
+	defer discosvc.UnregisterManyService(ctx, &discovery.DelServicesRequest{ServiceIds: []string{serviceIDA, serviceIDB}, Force: true})
 
-	response, _ := discosvc.RegisterService(context.Background(), &discovery.CreateServiceRequest{
+	response, err := discosvc.RegisterService(ctx, &discovery.CreateServiceRequest{
 		Service: &discovery.MicroService{
 			AppId:       "TestGetAPIParseFunc",
 			ServiceName: "A",
 		},
 	})
+	assert.NoError(t, err)
+
 	serviceIDA = response.ServiceId
-	response, _ = discosvc.RegisterService(context.Background(), &discovery.CreateServiceRequest{
+	response, err = discosvc.RegisterService(ctx, &discovery.CreateServiceRequest{
 		Service: &discovery.MicroService{
 			AppId:       "TestGetAPIParseFunc",
 			ServiceName: "B",
 		},
 	})
+	assert.NoError(t, err)
 	serviceIDB = response.ServiceId
 
 	newRequest := func(method, url string, body string) *http.Request {

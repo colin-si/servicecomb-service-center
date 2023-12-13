@@ -20,20 +20,23 @@ package util
 import (
 	"context"
 
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/little-cui/etcdadpt"
 )
 
-func FromContext(ctx context.Context) []client.PluginOpOption {
-	opts := make([]client.PluginOpOption, 0, 5)
-	switch {
-	case ctx.Value(util.CtxNocache) == "1":
-		opts = append(opts, client.WithNoCache())
-	case ctx.Value(util.CtxCacheOnly) == "1":
-		opts = append(opts, client.WithCacheOnly())
+func FromContext(ctx context.Context) []etcdadpt.OpOption {
+	opts := make([]etcdadpt.OpOption, 0, 5)
+	if util.NoCache(ctx) {
+		opts = append(opts, etcdadpt.WithNoCache())
+	} else if util.CacheOnly(ctx) {
+		opts = append(opts, etcdadpt.WithCacheOnly())
 	}
-	if ctx.Value(util.CtxGlobal) == "1" {
-		opts = append(opts, client.WithGlobal())
+	if util.Global(ctx) {
+		opts = append(opts, etcdadpt.WithGlobal())
 	}
 	return opts
+}
+
+func ContextOptions(ctx context.Context, opts ...etcdadpt.OpOption) []etcdadpt.OpOption {
+	return append(FromContext(ctx), opts...)
 }

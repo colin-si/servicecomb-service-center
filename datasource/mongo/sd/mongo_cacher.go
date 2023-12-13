@@ -24,13 +24,13 @@ import (
 	"sync"
 	"time"
 
-	rmodel "github.com/go-chassis/cari/discovery"
-
 	"github.com/apache/servicecomb-service-center/datasource/sdcommon"
-	"github.com/apache/servicecomb-service-center/pkg/backoff"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
+	"github.com/apache/servicecomb-service-center/pkg/goutil"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	rmodel "github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/foundation/backoff"
+	"github.com/go-chassis/foundation/gopool"
 )
 
 // MongoCacher manages mongo cache.
@@ -100,8 +100,7 @@ func (c *MongoCacher) doList(cfg sdcommon.ListWatchConfig) error {
 
 	resources := resp.Resources
 
-	defer log.Debug(fmt.Sprintf("finish to cache key %s, %d items",
-		c.Options.Key, len(resources)))
+	defer log.Debug(fmt.Sprintf("finish to cache key %s, %d items", c.Options.Key, len(resources)))
 
 	//just reset the cacher if cache marked dirty
 	if c.cache.Dirty() {
@@ -193,6 +192,10 @@ func (c *MongoCacher) handleEventBus(eventbus *sdcommon.EventBus) error {
 		}
 
 		for _, resource := range resp.Resources {
+			if resource.Value == nil {
+				log.Error(fmt.Sprintf("get nil value while watch for mongocache,the docID is %s", resource.Key), nil)
+				break
+			}
 			action := resp.Action
 			var event MongoEvent
 			switch action {
@@ -265,6 +268,7 @@ func (c *MongoCacher) filter(infos []*sdcommon.Resource) []MongoEvent {
 	for block := range eventsCh {
 		for _, e := range block {
 			if e.Value == nil {
+				log.Error(fmt.Sprintf("get nil value while do list, the docID is %s", e.DocumentID), nil)
 				break
 			}
 			events = append(events, e)
@@ -418,6 +422,6 @@ func NewMongoCacher(options *Options, cache MongoCache, pf parsefunc) *MongoCach
 			Key:       options.Key,
 			parseFunc: pf,
 		},
-		goroutine: gopool.New(context.Background()),
+		goroutine: goutil.New(),
 	}
 }

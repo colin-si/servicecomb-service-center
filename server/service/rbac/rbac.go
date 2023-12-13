@@ -21,7 +21,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
-	"io/ioutil"
+	"os"
 
 	"github.com/go-chassis/cari/pkg/errsvc"
 	"github.com/go-chassis/cari/rbac"
@@ -44,11 +44,12 @@ var (
 	ErrNoPermChangeAccount  = errors.New("can not change other account password")
 	ErrWrongPassword        = errors.New("current pwd is wrong")
 	ErrSamePassword         = errors.New("the password can not be same as old one")
-	ErrEmptyPassword        = errors.New("empty password")
+	ErrNoPrivateKey         = errors.New("read private key failed")
+
+	privateKey *rsa.PrivateKey
 )
 
-//Init decide whether enable rbac function and save root account to db
-// if db has root account, abort creating.
+// Init decide whether enable rbac function and save the build-in roles to db
 func Init() {
 	if !Enabled() {
 		log.Info("rbac is disabled")
@@ -59,43 +60,70 @@ func Init() {
 	if err != nil {
 		log.Fatal("can not enable auth module", err)
 	}
-	// role init before account
+	migrateOldRoles()
+	// build-in role init
 	initBuildInRole()
+	initBuildInAccount()
+	add2WhiteAPIList()
+	readPrivateKey()
+	readPublicKey()
+	log.Info("rbac is enabled")
+}
+
+func add2WhiteAPIList() {
+	rbac.Add2WhiteAPIList(APITokenGranter)
+	rbac.Add2WhiteAPIList("/v4/:project/registry/version", "/version")
+	rbac.Add2WhiteAPIList("/v4/:project/registry/health", "/health")
+
+	// user can list self permission without account get permission
+	Add2CheckPermWhiteAPIList(APISelfPerms)
+	// user can change self password without account modify permission
+	Add2CheckPermWhiteAPIList(APIAccountPassword)
+}
+
+func initBuildInAccount() {
 	accountExist, err := AccountExist(context.Background(), RootName)
 	if err != nil {
 		log.Fatal("can not enable auth module", err)
 	}
 	if !accountExist {
-		initFirstTime(RootName)
+		initFirstTime()
 	}
-	readPrivateKey()
-	readPublicKey()
-	rbac.Add2WhiteAPIList(APITokenGranter)
-	log.Info("rbac is enabled")
 }
 
-//read key to memory
+// read key to memory
 func readPrivateKey() {
 	pf := config.GetString("rbac.privateKeyFile", "", config.WithStandby("rbac_rsa_private_key_file"))
 	// 打开文件
-	data, err := ioutil.ReadFile(pf)
+	data, err := os.ReadFile(pf)
 	if err != nil {
 		log.Fatal("can not read private key", err)
 		return
 	}
-	err = archaius.Set("rbac_private_key", string(data))
+	content := string(data)
+	err = archaius.Set("rbac_private_key", content)
 	if err != nil {
 		log.Fatal("can not init rbac", err)
+		return
+	}
+	privateKeyContent, err := cipher.Decrypt(content)
+	if err != nil {
+		log.Warn("cipher fallback: " + err.Error())
+		privateKeyContent = content
+	}
+	privateKey, err = secret.ParseRSAPrivateKey(privateKeyContent)
+	if err != nil {
+		log.Error("can not parse private key", err)
 		return
 	}
 	log.Info("read private key success")
 }
 
-//read key to memory
+// read key to memory
 func readPublicKey() {
 	pf := config.GetString("rbac.publicKeyFile", "", config.WithStandby("rbac_rsa_public_key_file"))
 	// 打开文件
-	content, err := ioutil.ReadFile(pf)
+	content, err := os.ReadFile(pf)
 	if err != nil {
 		log.Fatal("can not find public key", err)
 		return
@@ -106,76 +134,62 @@ func readPublicKey() {
 	}
 	log.Info("read public key success")
 }
-func initFirstTime(admin string) {
+func initFirstTime() {
 	//handle root account
-	pwd, err := getPassword()
-	if err != nil {
-		log.Fatal("can not enable rbac, password is empty", nil)
+	pwd := getPassword()
+	if len(pwd) == 0 {
+		log.Warn("skip init root account! Cause by " + InitPassword + " is empty. " +
+			"Please use the private key to generate a ROOT token and call " + APIAccountList + " create ROOT!")
+		return
 	}
 	a := &rbac.Account{
-		Name:     admin,
-		Password: pwd,
+		Name:     RootName,
 		Roles:    []string{rbac.RoleAdmin},
+		Password: pwd,
 	}
-	err = CreateAccount(context.Background(), a)
+	err := CreateAccount(context.Background(), a)
 	if err == nil {
 		log.Info("root account init success")
 		return
 	}
-	svcErr, ok := err.(*errsvc.Error)
-	if ok && svcErr.Code == rbac.ErrAccountConflict {
+	if errsvc.IsErrEqualCode(err, rbac.ErrAccountConflict) {
 		log.Info("root account already exist")
 		return
 	}
 	log.Fatal("can not enable rbac, init root account failed", err)
 }
 
-func getPassword() (string, error) {
+func getPassword() string {
 	p := archaius.GetString(InitPassword, "")
 	if p == "" {
-		log.Fatal("can not enable rbac, password is empty", nil)
-		return "", ErrEmptyPassword
+		return ""
 	}
 	d, err := cipher.Decrypt(p)
 	if err != nil {
 		log.Warn("cipher fallback: " + err.Error())
-		return p, nil
+		return p
 	}
-	return d, nil
+	return d
 }
 
 func Enabled() bool {
 	return config.GetRBAC().EnableRBAC
 }
 
-//PublicKey get public key to verify a token
+// PublicKey get public key to verify a token
 func PublicKey() string {
 	return archaius.GetString("rbac_public_key", "")
 }
 
-//privateKey get decrypted private key to verify a token
-func privateKey() string {
-	ep := archaius.GetString("rbac_private_key", "")
-	p, err := cipher.Decrypt(ep)
-	if err != nil {
-		log.Warn("cipher fallback: " + err.Error())
-		return ep
-	}
-	return p
-}
-
-//GetPrivateKey return rsa key instance
+// GetPrivateKey return rsa key instance
 func GetPrivateKey() (*rsa.PrivateKey, error) {
-	sk := privateKey()
-	p, err := secret.ParseRSAPrivateKey(sk)
-	if err != nil {
-		log.Error("can not get key:", err)
-		return nil, err
+	if privateKey == nil {
+		return nil, ErrNoPrivateKey
 	}
-	return p, nil
+	return privateKey, nil
 }
 
-//MakeBanKey return ban key
+// MakeBanKey return ban key
 func MakeBanKey(name, ip string) string {
 	return name + "::" + ip
 }

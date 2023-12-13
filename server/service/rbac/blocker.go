@@ -18,84 +18,65 @@
 package rbac
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
+	"github.com/apache/servicecomb-service-center/pkg/log"
+	accountsvc "github.com/apache/servicecomb-service-center/server/service/account"
 	"golang.org/x/time/rate"
 )
 
 const (
-	MaxAttempts = 2
-
-	BlockInterval = 1 * time.Hour
+	MaxAttempts   = 2
+	BlockInterval = 15 * time.Minute
 )
-
-var BanTime = 1 * time.Hour
-
-type Client struct {
-	limiter   *rate.Limiter
-	Key       string
-	Banned    bool
-	ReleaseAt time.Time //at this time client can be allow to attempt to do something
-}
 
 var clients sync.Map
 
-func BannedList() []*Client {
-	cs := make([]*Client, 0)
-	clients.Range(func(key, value interface{}) bool {
-		client := value.(*Client)
-		if client.Banned && time.Now().After(client.ReleaseAt) {
-			client.Banned = false
-			client.ReleaseAt = time.Time{}
-			return true
-		}
-		cs = append(cs, client)
-		return true
-	})
-	return cs
+type LoginFailureLimiter struct {
+	limiter *rate.Limiter
+	Key     string
 }
 
-//CountFailure can cause a client banned
+// TryLockAccount try to lock the account login attempt
 // it use time/rate to allow certainty failure,
-//but will ban client if rate limiter can not accept failures
-func CountFailure(key string) {
+// it will ban client if rate limiter can not accept failures
+func TryLockAccount(key string) {
 	var c interface{}
-	var client *Client
+	var l *LoginFailureLimiter
 	var ok bool
-	now := time.Now()
 	if c, ok = clients.Load(key); !ok {
-		client = &Client{
-			Key:       key,
-			limiter:   rate.NewLimiter(rate.Every(BlockInterval), MaxAttempts),
-			ReleaseAt: time.Time{},
+		l = &LoginFailureLimiter{
+			Key:     key,
+			limiter: rate.NewLimiter(rate.Every(BlockInterval), MaxAttempts),
 		}
-		clients.Store(key, client)
+		clients.Store(key, l)
 	} else {
-		client = c.(*Client)
+		l = c.(*LoginFailureLimiter)
 	}
 
-	allow := client.limiter.AllowN(time.Now(), 1)
+	allow := l.limiter.AllowN(time.Now(), 1)
+	status := rbac.StatusAttempted
 	if !allow {
-		client.Banned = true
-		client.ReleaseAt = now.Add(BanTime)
+		status = rbac.StatusBanned
+	}
+	err := accountsvc.Lock(context.Background(), key, status)
+	if err != nil {
+		log.Error(fmt.Sprintf("can not ban account %s", key), err)
 	}
 }
 
-//IsBanned check if a client is banned, and if client ban time expire,
-//it will release the client from banned status
-//use account name plus ip as key will maximum reduce the client conflicts
+// IsBanned check if a client is banned, and if client ban time expire,
+// it will release the client from banned status
+// use account name plus ip as key will maximum reduce the client conflicts
 func IsBanned(key string) bool {
-	var c interface{}
-	var client *Client
-	var ok bool
-	if c, ok = clients.Load(key); !ok {
-		return false
+	banned, err := accountsvc.IsBanned(context.TODO(), key)
+	if err != nil {
+		log.Error("can not check lock list, so return banned for security concern", err)
+		return true
 	}
-	client = c.(*Client)
-	if client.Banned && time.Now().After(client.ReleaseAt) {
-		client.Banned = false
-		client.ReleaseAt = time.Time{}
-	}
-	return client.Banned
+	return banned
 }

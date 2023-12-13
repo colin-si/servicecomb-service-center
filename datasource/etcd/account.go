@@ -1,98 +1,96 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package etcd
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
-	"github.com/go-chassis/cari/rbac"
+	crbac "github.com/go-chassis/cari/rbac"
 	"github.com/go-chassis/foundation/stringutil"
+	"github.com/little-cui/etcdadpt"
 
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
-	"github.com/apache/servicecomb-service-center/pkg/etcdsync"
+	esync "github.com/apache/servicecomb-service-center/datasource/etcd/sync"
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
 	"github.com/apache/servicecomb-service-center/pkg/log"
-	"github.com/apache/servicecomb-service-center/pkg/privacy"
-	"github.com/apache/servicecomb-service-center/pkg/util"
 )
 
-type AccountManager struct {
+func init() {
+	rbac.Install("etcd", NewRbacDAO)
+	rbac.Install("embeded_etcd", NewRbacDAO)
+	rbac.Install("embedded_etcd", NewRbacDAO)
 }
 
-func (ds *AccountManager) CreateAccount(ctx context.Context, a *rbac.Account) error {
-	lock, err := etcdsync.Lock("/account-creating/"+a.Name, -1, false)
-	if err != nil {
-		return fmt.Errorf("account %s is creating", a.Name)
-	}
-	defer func() {
-		err := lock.Unlock()
-		if err != nil {
-			log.Errorf(err, "can not release account lock")
-		}
-	}()
+func NewRbacDAO(opts rbac.Options) (rbac.DAO, error) {
+	return &RbacDAO{}, nil
+}
+
+type RbacDAO struct {
+}
+
+func (ds *RbacDAO) CreateAccount(ctx context.Context, a *crbac.Account) error {
 	exist, err := ds.AccountExist(ctx, a.Name)
 	if err != nil {
-		log.Errorf(err, "can not save account info")
+		log.Error("can not save account info", err)
 		return err
 	}
 	if exist {
-		return datasource.ErrAccountDuplicated
+		return rbac.ErrAccountDuplicated
 	}
-	a.Password, err = privacy.ScryptPassword(a.Password)
-	if err != nil {
-		log.Error("pwd hash failed", err)
-		return err
-	}
-	a.Role = ""
-	a.CurrentPassword = ""
-	a.ID = util.GenerateUUID()
-	a.CreateTime = strconv.FormatInt(time.Now().Unix(), 10)
-	a.UpdateTime = a.CreateTime
-	opts, err := GenAccountOpts(a, client.ActionPut)
+
+	opts, err := GenAccountOpts(a, etcdadpt.ActionPut)
 	if err != nil {
 		log.Error("", err)
 		return err
 	}
-	err = client.BatchCommit(ctx, opts)
+	syncOpts, err := esync.GenCreateOpts(ctx, datasource.ResourceAccount, a)
 	if err != nil {
-		log.Errorf(err, "can not save account info")
+		log.Error("fail to create sync opts", err)
+		return err
+	}
+	opts = append(opts, syncOpts...)
+	err = etcdadpt.Txn(ctx, opts)
+	if err != nil {
+		log.Error("can not save account info", err)
 		return err
 	}
 	log.Info("create new account: " + a.ID)
 	return nil
 }
-func GenAccountOpts(a *rbac.Account, action client.ActionType) ([]client.PluginOp, error) {
-	opts := make([]client.PluginOp, 0)
+
+func GenAccountOpts(a *crbac.Account, action etcdadpt.Action) ([]etcdadpt.OpOptions, error) {
+	opts := make([]etcdadpt.OpOptions, 0)
 	value, err := json.Marshal(a)
 	if err != nil {
-		log.Errorf(err, "account info is invalid")
+		log.Error("account info is invalid", err)
 		return nil, err
 	}
-	opts = append(opts, client.PluginOp{
+	opts = append(opts, etcdadpt.OpOptions{
 		Key:    stringutil.Str2bytes(path.GenerateAccountKey(a.Name)),
 		Value:  value,
 		Action: action,
 	})
 	for _, r := range a.Roles {
-		opt := client.PluginOp{
+		opt := etcdadpt.OpOptions{
 			Key:    stringutil.Str2bytes(path.GenRoleAccountIdxKey(r, a.Name)),
 			Action: action,
 		}
@@ -101,40 +99,29 @@ func GenAccountOpts(a *rbac.Account, action client.ActionType) ([]client.PluginO
 
 	return opts, nil
 }
-func (ds *AccountManager) AccountExist(ctx context.Context, name string) (bool, error) {
-	resp, err := client.Instance().Do(ctx, client.GET,
-		client.WithStrKey(path.GenerateRBACAccountKey(name)))
-	if err != nil {
-		return false, err
-	}
-	if resp.Count == 0 {
-		return false, nil
-	}
-	return true, nil
+
+func (ds *RbacDAO) AccountExist(ctx context.Context, name string) (bool, error) {
+	return etcdadpt.Exist(ctx, path.GenerateRBACAccountKey(name))
 }
-func (ds *AccountManager) GetAccount(ctx context.Context, name string) (*rbac.Account, error) {
-	resp, err := client.Instance().Do(ctx, client.GET,
-		client.WithStrKey(path.GenerateRBACAccountKey(name)))
+func (ds *RbacDAO) GetAccount(ctx context.Context, name string) (*crbac.Account, error) {
+	kv, err := etcdadpt.Get(ctx, path.GenerateRBACAccountKey(name))
 	if err != nil {
 		return nil, err
 	}
-	if resp.Count == 0 {
-		return nil, datasource.ErrAccountNotExist
+	if kv == nil {
+		return nil, rbac.ErrAccountNotExist
 	}
-	if resp.Count != 1 {
-		return nil, client.ErrNotUnique
-	}
-	account := &rbac.Account{}
-	err = json.Unmarshal(resp.Kvs[0].Value, account)
+	account := &crbac.Account{}
+	err = json.Unmarshal(kv.Value, account)
 	if err != nil {
-		log.Errorf(err, "account info format invalid")
+		log.Error("account info format invalid", err)
 		return nil, err
 	}
 	ds.compatibleOldVersionAccount(account)
 	return account, nil
 }
 
-func (ds *AccountManager) compatibleOldVersionAccount(a *rbac.Account) {
+func (ds *RbacDAO) compatibleOldVersionAccount(a *crbac.Account) {
 	// old version use Role, now use Roles
 	// Role/Roles will not exist at the same time
 	if len(a.Role) == 0 {
@@ -144,15 +131,14 @@ func (ds *AccountManager) compatibleOldVersionAccount(a *rbac.Account) {
 	a.Role = ""
 }
 
-func (ds *AccountManager) ListAccount(ctx context.Context) ([]*rbac.Account, int64, error) {
-	resp, err := client.Instance().Do(ctx, client.GET,
-		client.WithStrKey(path.GenerateRBACAccountKey("")), client.WithPrefix())
+func (ds *RbacDAO) ListAccount(ctx context.Context) ([]*crbac.Account, int64, error) {
+	kvs, n, err := etcdadpt.List(ctx, path.GenerateRBACAccountKey(""))
 	if err != nil {
 		return nil, 0, err
 	}
-	accounts := make([]*rbac.Account, 0, resp.Count)
-	for _, v := range resp.Kvs {
-		a := &rbac.Account{}
+	accounts := make([]*crbac.Account, 0, n)
+	for _, v := range kvs {
+		a := &crbac.Account{}
 		err = json.Unmarshal(v.Value, a)
 		if err != nil {
 			log.Error("account info format invalid:", err)
@@ -162,46 +148,93 @@ func (ds *AccountManager) ListAccount(ctx context.Context) ([]*rbac.Account, int
 		ds.compatibleOldVersionAccount(a)
 		accounts = append(accounts, a)
 	}
-	return accounts, resp.Count, nil
+	return accounts, n, nil
 }
-func (ds *AccountManager) DeleteAccount(ctx context.Context, names []string) (bool, error) {
+func (ds *RbacDAO) DeleteAccount(ctx context.Context, names []string) (bool, error) {
 	if len(names) == 0 {
 		return false, nil
 	}
+	var allOpts []etcdadpt.OpOptions
 	for _, name := range names {
 		a, err := ds.GetAccount(ctx, name)
 		if err != nil {
 			log.Error("", err)
 			continue //do not fail if some account is invalid
-
 		}
 		if a == nil {
 			log.Warn("can not find account")
 			continue
 		}
-		opts, err := GenAccountOpts(a, client.ActionDelete)
+		opts, err := GenAccountOpts(a, etcdadpt.ActionDelete)
 		if err != nil {
 			log.Error("", err)
 			continue //do not fail if some account is invalid
 
 		}
-		err = client.BatchCommit(ctx, opts)
+		allOpts = append(allOpts, opts...)
+		syncOpts, err := esync.GenDeleteOpts(ctx, datasource.ResourceAccount, a.Name, a)
 		if err != nil {
-			log.Error(datasource.ErrDeleteAccountFailed.Error(), err)
+			log.Error("fail to create sync opts", err)
 			return false, err
 		}
+		allOpts = append(allOpts, syncOpts...)
+	}
+	err := etcdadpt.Txn(ctx, allOpts)
+	if err != nil {
+		log.Error(rbac.ErrDeleteAccountFailed.Error(), err)
+		return false, err
 	}
 	return true, nil
 }
-func (ds *AccountManager) UpdateAccount(ctx context.Context, name string, account *rbac.Account) error {
+
+func (ds *RbacDAO) UpdateAccount(ctx context.Context, name string, account *crbac.Account) error {
+	var (
+		opts []etcdadpt.OpOptions
+		err  error
+	)
+
 	account.UpdateTime = strconv.FormatInt(time.Now().Unix(), 10)
-	value, err := json.Marshal(account)
+
+	opts, err = GenAccountOpts(account, etcdadpt.ActionPut)
 	if err != nil {
-		log.Errorf(err, "account info is invalid")
+		log.Error("GenAccountOpts failed", err)
 		return err
 	}
-	_, err = client.Instance().Do(ctx, client.PUT,
-		client.WithStrKey(path.GenerateRBACAccountKey(name)),
-		client.WithValue(value))
+
+	old, err := ds.GetAccount(ctx, account.Name)
+	if err != nil {
+		log.Error("GetAccount failed", err)
+		return err
+	}
+
+	for _, r := range old.Roles {
+		if hasRole(account, r) {
+			continue
+		}
+		opt := etcdadpt.OpOptions{
+			Key:    stringutil.Str2bytes(path.GenRoleAccountIdxKey(r, old.Name)),
+			Action: etcdadpt.ActionDelete,
+		}
+		opts = append(opts, opt)
+	}
+	syncOpts, err := esync.GenUpdateOpts(ctx, datasource.ResourceAccount, account)
+	if err != nil {
+		log.Error("fail to create sync opts", err)
+		return err
+	}
+	opts = append(opts, syncOpts...)
+	err = etcdadpt.Txn(ctx, opts)
+	if err != nil {
+		log.Error("BatchCommit failed", err)
+	}
 	return err
+}
+
+func hasRole(account *crbac.Account, r string) bool {
+	for _, n := range account.Roles {
+		if r == n {
+			return true
+		}
+	}
+	return false
 }

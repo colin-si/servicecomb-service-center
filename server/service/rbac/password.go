@@ -19,16 +19,14 @@ package rbac
 
 import (
 	"context"
-
-	"github.com/go-chassis/cari/discovery"
-	"github.com/go-chassis/cari/rbac"
-	"github.com/go-chassis/foundation/stringutil"
-	"golang.org/x/crypto/bcrypt"
+	"fmt"
 
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/privacy"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/service/validator"
+	"github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/cari/rbac"
 )
 
 func ChangePassword(ctx context.Context, a *rbac.Account) error {
@@ -74,8 +72,8 @@ func changePassword(ctx context.Context, name, currentPassword, pwd string) erro
 	}
 	ip := util.GetIPFromContext(ctx)
 	if IsBanned(MakeBanKey(name, ip)) {
-		log.Warnf("ip [%s] is banned, account: %s", ip, name)
-		return rbac.NewError(rbac.ErrAccountBlocked, "")
+		log.Warn(fmt.Sprintf("ip [%s] is banned, account: %s", ip, name))
+		return ErrAccountBlocked
 	}
 	if currentPassword == pwd {
 		return rbac.NewError(rbac.ErrNewPwdBad, ErrSamePassword.Error())
@@ -88,19 +86,19 @@ func changePassword(ctx context.Context, name, currentPassword, pwd string) erro
 	same := privacy.SamePassword(old.Password, currentPassword)
 	if !same {
 		log.Error("current password is wrong", nil)
-		CountFailure(MakeBanKey(name, ip))
-		return rbac.NewError(rbac.ErrOldPwdWrong, "")
+		TryLockAccount(MakeBanKey(name, ip))
+		return ErrOldPwdWrong
 	}
 	return doChangePassword(ctx, old, pwd)
 }
 
 func doChangePassword(ctx context.Context, old *rbac.Account, pwd string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(pwd), 14)
+	var err error
+	old.Password, err = privacy.ScryptPassword(pwd)
 	if err != nil {
-		log.Error("pwd hash failed", err)
+		log.Error("encrypt password failed", err)
 		return err
 	}
-	old.Password = stringutil.Bytes2str(hash)
 	err = EditAccount(ctx, old)
 	if err != nil {
 		log.Error("can not change pwd", err)

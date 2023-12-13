@@ -1,71 +1,79 @@
 /*
-* Licensed to the Apache Software Foundation (ASF) under one or more
-* contributor license agreements.  See the NOTICE file distributed with
-* this work for additional information regarding copyright ownership.
-* The ASF licenses this file to You under the Apache License, Version 2.0
-* (the "License"); you may not use this file except in compliance with
-* the License.  You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package sd
 
 import (
-	"github.com/patrickmn/go-cache"
+	"sync"
+
+	cmp "github.com/orcaman/concurrent-map"
 )
 
 type IndexCache struct {
-	store *cache.Cache
+	l sync.RWMutex
+	// store cmp.ConcurrentMap.
+	store map[string]cmp.ConcurrentMap
 }
 
-func NewIndexCache() *IndexCache {
-	return &IndexCache{
-		store: cache.New(cache.NoExpiration, 0),
+func NewIndexCache() IndexCache {
+	return IndexCache{
+		store: make(map[string]cmp.ConcurrentMap),
 	}
 }
 
-func (i *IndexCache) Get(key string) []string {
-	if v, found := i.store.Get(key); found {
-		hset, ok := v.(*Hset)
-		if ok {
-			return hset.Iter()
-		}
+func (m *IndexCache) Get(key string) []string {
+	m.l.RLock()
+	defer m.l.RUnlock()
+	cmap, exist := m.store[key]
+	if !exist {
+		return []string{}
 	}
-	return nil
+	return cmap.Keys()
 }
 
-func (i *IndexCache) Put(key string, value string) {
-	//todo this should be atomic
-	v, found := i.store.Get(key)
-	if !found {
-		i.store.Set(key, Newhset(value), cache.NoExpiration)
-		return
+func (m *IndexCache) Put(key string, value string) {
+	m.l.Lock()
+	defer m.l.Unlock()
+	cmap, exist := m.store[key]
+	if !exist {
+		cmap = cmp.New()
+		m.store[key] = cmap
 	}
-	set, ok := v.(*Hset)
-	if !ok {
-		return
-	}
-	set.Insert(value)
+	cmap.Set(value, nil)
 }
 
-func (i *IndexCache) Delete(key string, value string) {
-	v, found := i.store.Get(key)
-	if !found {
+func (m *IndexCache) Delete(key string, value string) {
+	m.l.Lock()
+	defer m.l.Unlock()
+	cmap, exist := m.store[key]
+	if !exist {
 		return
 	}
-	set, ok := v.(*Hset)
-	if !ok {
-		return
+	cmap.Remove(value)
+	if cmap.Count() == 0 {
+		delete(m.store, key)
 	}
-	set.Del(value)
-	if set.Len() == 0 {
-		i.store.Delete(key)
+}
+
+func (m *IndexCache) Clear() {
+	m.l.Lock()
+	defer m.l.Unlock()
+	for k, v := range m.store {
+		v.Clear()
+		delete(m.store, k)
 	}
 }

@@ -18,11 +18,24 @@
 package util
 
 import (
+	"bytes"
 	"runtime"
 	"strings"
-	"time"
 	"unsafe"
+
+	"github.com/cloudflare/gokey"
 )
+
+const TypePass = "pass"
+
+var passwordSpec = &gokey.PasswordSpec{
+	Length:         8,
+	Upper:          1,
+	Lower:          1,
+	Digits:         1,
+	Special:        1,
+	AllowedSpecial: "-~!@#$%^&*()_=+|<>{}[]",
+}
 
 func SafeCloseChan(c chan struct{}) {
 	if c == nil {
@@ -115,15 +128,6 @@ func Int16ToInt64(bs []int16) (in int64) {
 	return
 }
 
-func FileLastName(file string) string {
-	if sp1 := strings.LastIndex(file, "/"); sp1 >= 0 {
-		if sp2 := strings.LastIndex(file[:sp1], "/"); sp2 >= 0 {
-			file = file[sp2+1:]
-		}
-	}
-	return file
-}
-
 func SliceHave(arr []string, str string) bool {
 	for _, item := range arr {
 		if item == str {
@@ -131,22 +135,6 @@ func SliceHave(arr []string, str string) bool {
 		}
 	}
 	return false
-}
-
-// do not call after drain timer.C channel
-func ResetTimer(timer *time.Timer, d time.Duration) {
-	if !timer.Stop() {
-		// timer is expired: can not find the timer in timer stack
-		// select {
-		// case <-timer.C:
-		// 	// here block when drain channel call before timer.Stop()
-		// default:
-		// 	// here will cause a BUG When sendTime() after drain channel
-		// 	// BUG: timer.C still trigger even after timer.Reset()
-		// }
-		<-timer.C
-	}
-	timer.Reset(d)
 }
 
 func StringTRUE(s string) bool {
@@ -171,4 +159,38 @@ func ToDomainProject(domain, project string) (domainProject string) {
 
 func IsVersionOrHealthPattern(pattern string) bool {
 	return strings.HasSuffix(pattern, "/version") || strings.HasSuffix(pattern, "/health")
+}
+
+func ToSnake(name string) string {
+	if name == "" {
+		return ""
+	}
+	temp := strings.Split(name, "-")
+	var buffer bytes.Buffer
+	for num, v := range temp {
+		vv := []rune(v)
+		if num == 0 {
+			buffer.WriteString(string(vv))
+			continue
+		}
+		if len(vv) > 0 {
+			if vv[0] >= 'a' && vv[0] <= 'z' { //首字母大写
+				vv[0] -= 32
+			}
+			buffer.WriteString(string(vv))
+		}
+	}
+	return buffer.String()
+}
+
+func GeneratePassword() (string, error) {
+	seed, err := gokey.GenerateEncryptedKeySeed(TypePass)
+	if err != nil {
+		return "", err
+	}
+	pass, err := gokey.GetPass(TypePass, "", seed, passwordSpec)
+	if err != nil {
+		return "", err
+	}
+	return pass, nil
 }

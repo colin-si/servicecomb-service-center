@@ -20,46 +20,47 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
+
 	pb "github.com/go-chassis/cari/discovery"
 
 	"github.com/apache/servicecomb-service-center/datasource/etcd/cache"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
 )
 
 func TestNewDependencyRuleEventHandler(t *testing.T) {
 	consumerId := "1"
 	provider := &pb.MicroServiceKey{Tenant: "x/y", Version: "0+"}
-	b := cache.DependencyRule.ExistVersionRule(context.Background(), consumerId, provider)
+	b := cache.DependencyRule.ExistRule(context.Background(), consumerId, provider)
 	if b {
 		t.Fatalf("TestNewDependencyRuleEventHandler failed")
 	}
 	h := NewDependencyRuleEventHandler()
-	h.OnEvent(sd.KvEvent{Type: pb.EVT_CREATE})
-	b = cache.DependencyRule.ExistVersionRule(context.Background(), consumerId, provider)
+	h.OnEvent(kvstore.Event{Type: pb.EVT_CREATE})
+	b = cache.DependencyRule.ExistRule(context.Background(), consumerId, provider)
 	if !b {
 		t.Fatalf("TestNewDependencyRuleEventHandler failed")
 	}
-	h.OnEvent(sd.KvEvent{Type: pb.EVT_INIT})
-	b = cache.DependencyRule.ExistVersionRule(context.Background(), consumerId, provider)
+	h.OnEvent(kvstore.Event{Type: pb.EVT_INIT})
+	b = cache.DependencyRule.ExistRule(context.Background(), consumerId, provider)
 	if !b {
 		t.Fatalf("TestNewDependencyRuleEventHandler failed")
 	}
-	h.OnEvent(sd.KvEvent{Type: pb.EVT_UPDATE, KV: &sd.KeyValue{
+	h.OnEvent(kvstore.Event{Type: pb.EVT_UPDATE, KV: &kvstore.KeyValue{
 		Key: []byte(path.GenerateProviderDependencyRuleKey("x/y", provider))}})
-	b = cache.DependencyRule.ExistVersionRule(context.Background(), consumerId, provider)
+	b = cache.DependencyRule.ExistRule(context.Background(), consumerId, provider)
 	if b {
 		t.Fatalf("TestNewDependencyRuleEventHandler failed")
 	}
-	h.OnEvent(sd.KvEvent{Type: pb.EVT_DELETE, KV: &sd.KeyValue{
+	h.OnEvent(kvstore.Event{Type: pb.EVT_DELETE, KV: &kvstore.KeyValue{
 		Key: []byte(path.GenerateProviderDependencyRuleKey("x/y", provider))}})
-	b = cache.DependencyRule.ExistVersionRule(context.Background(), consumerId, provider)
+	b = cache.DependencyRule.ExistRule(context.Background(), consumerId, provider)
 	if b {
 		t.Fatalf("TestNewDependencyRuleEventHandler failed")
 	}
-	h.OnEvent(sd.KvEvent{Type: pb.EVT_DELETE, KV: &sd.KeyValue{
+	h.OnEvent(kvstore.Event{Type: pb.EVT_DELETE, KV: &kvstore.KeyValue{
 		Key: []byte(path.GenerateConsumerDependencyRuleKey("x/y", provider))}})
-	b = cache.DependencyRule.ExistVersionRule(context.Background(), consumerId, provider)
+	b = cache.DependencyRule.ExistRule(context.Background(), consumerId, provider)
 	if !b {
 		t.Fatalf("TestNewDependencyRuleEventHandler failed")
 	}

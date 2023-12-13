@@ -17,43 +17,45 @@
 package integrationtest_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/go-chassis/cari/discovery"
-	"github.com/gorilla/websocket"
-	"github.com/stretchr/testify/assert"
-
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-	"github.com/widuu/gojson"
-
-	"bytes"
-	"io/ioutil"
-	"math/rand"
-	"strconv"
 	"testing"
 	"time"
 
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+
 	. "github.com/apache/servicecomb-service-center/integration"
+	"github.com/go-chassis/cari/discovery"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/widuu/gojson"
 )
 
 var _ = Describe("MicroService Api Test", func() {
 	var serviceName = ""
-	var serviceId = ""
+	var providerID = ""
+	var consumerID = ""
 	var serviceAppId = "integrationtestAppIdInstance"
 	var serviceVersion = "0.0.2"
 	var serviceInstanceID = ""
+	var alias = ""
 	Context("Tesing MicroService Instances API's", func() {
 		BeforeEach(func() {
 			schema := []string{"testSchema"}
 			properties := map[string]string{"attr1": "aa"}
 			serviceName = strconv.Itoa(rand.Intn(15))
+			alias = serviceAppId + ":" + serviceName
 			servicemap := map[string]interface{}{
 				"serviceName": serviceName,
+				"alias":       alias,
 				"appId":       serviceAppId,
 				"version":     serviceVersion,
 				"description": "examples",
@@ -75,9 +77,30 @@ var _ = Describe("MicroService Api Test", func() {
 
 			// Validate the service creation
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
-			respbody, _ := ioutil.ReadAll(resp.Body)
-			serviceId = gojson.Json(string(respbody)).Get("serviceId").Tostring()
-			Expect(len(serviceId)).Should(BeNumerically("==", LengthUUID))
+			respbody, _ := io.ReadAll(resp.Body)
+			providerID = gojson.Json(string(respbody)).Get("serviceId").Tostring()
+			Expect(len(providerID)).Should(BeNumerically("==", LengthUUID))
+
+			servicemap = map[string]interface{}{
+				"serviceName": "C_" + serviceName,
+				"appId":       serviceAppId,
+				"version":     serviceVersion,
+			}
+			bodyParams = map[string]interface{}{
+				"service": servicemap,
+			}
+			body, _ = json.Marshal(bodyParams)
+			bodyBuf = bytes.NewReader(body)
+			req, _ = http.NewRequest(POST, SCURL+REGISTERMICROSERVICE, bodyBuf)
+			req.Header.Set("X-Domain-Name", "default")
+			resp, err = scclient.Do(req)
+			Expect(err).To(BeNil())
+			defer resp.Body.Close()
+
+			// Validate the service creation
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+			respbody, _ = io.ReadAll(resp.Body)
+			consumerID = gojson.Json(string(respbody)).Get("serviceId").Tostring()
 
 			//Register MicroService Instance
 			endpoints := []string{"cse://127.0.0.1:9984"}
@@ -103,7 +126,7 @@ var _ = Describe("MicroService Api Test", func() {
 			bodyParams = map[string]interface{}{
 				"instance": instance,
 			}
-			url := strings.Replace(REGISTERINSTANCE, ":serviceId", serviceId, 1)
+			url := strings.Replace(REGISTERINSTANCE, ":serviceId", providerID, 1)
 			body, _ = json.Marshal(bodyParams)
 			bodyBuf = bytes.NewReader(body)
 			req, _ = http.NewRequest(POST, SCURL+url, bodyBuf)
@@ -114,27 +137,31 @@ var _ = Describe("MicroService Api Test", func() {
 
 			// Validate the instance registration
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
-			respbody, _ = ioutil.ReadAll(resp.Body)
+			respbody, _ = io.ReadAll(resp.Body)
 			serviceInstanceID = gojson.Json(string(respbody)).Get("instanceId").Tostring()
-			Expect(len(serviceId)).Should(BeNumerically("==", LengthUUID))
+			Expect(len(providerID)).Should(BeNumerically("==", LengthUUID))
 
 		})
 
 		AfterEach(func() {
 			if serviceInstanceID != "" {
-				url := strings.Replace(UNREGISTERINSTANCE, ":serviceId", serviceId, 1)
+				url := strings.Replace(UNREGISTERINSTANCE, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInstanceID, 1)
 				req, _ := http.NewRequest(DELETE, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
 				resp, _ := scclient.Do(req)
+				defer resp.Body.Close()
+				respbody, _ := io.ReadAll(resp.Body)
+				By(string(respbody))
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			}
 
-			if serviceId != "" {
-				url := strings.Replace(UNREGISTERMICROSERVICE, ":serviceId", serviceId, 1)
+			if providerID != "" {
+				url := strings.Replace(UNREGISTERMICROSERVICE, ":serviceId", providerID, 1)
 				req, _ := http.NewRequest(DELETE, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
 				resp, _ := scclient.Do(req)
+				defer resp.Body.Close()
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			}
 
@@ -151,7 +178,7 @@ var _ = Describe("MicroService Api Test", func() {
 				bodyParams := map[string]interface{}{
 					"instancse": instance,
 				}
-				url := strings.Replace(REGISTERINSTANCE, ":serviceId", serviceId, 1)
+				url := strings.Replace(REGISTERINSTANCE, ":serviceId", providerID, 1)
 				body, _ := json.Marshal(bodyParams)
 				bodyBuf := bytes.NewReader(body)
 				req, _ := http.NewRequest(POST, SCURL+url, bodyBuf)
@@ -188,7 +215,7 @@ var _ = Describe("MicroService Api Test", func() {
 				bodyParams := map[string]interface{}{
 					"instance": instance,
 				}
-				url := strings.Replace(REGISTERINSTANCE, ":serviceId", serviceId, 1)
+				url := strings.Replace(REGISTERINSTANCE, ":serviceId", providerID, 1)
 				body, _ := json.Marshal(bodyParams)
 				bodyBuf := bytes.NewReader(body)
 				req, _ := http.NewRequest(POST, SCURL+url, bodyBuf)
@@ -199,7 +226,7 @@ var _ = Describe("MicroService Api Test", func() {
 
 				// Validate the instance registration
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 
 				//Validate the instance id is same as the old one
 				Expect(gojson.Json(string(respbody)).Get("instanceId").Tostring()).To(Equal(serviceInstanceID))
@@ -214,8 +241,8 @@ var _ = Describe("MicroService Api Test", func() {
 				}
 				healthcheck := map[string]interface{}{
 					"mode":     "push",
-					"interval": 30,
-					"times":    2,
+					"interval": 60,
+					"times":    3,
 				}
 				instance := map[string]interface{}{
 					"endpoints":   endpoints,
@@ -229,7 +256,7 @@ var _ = Describe("MicroService Api Test", func() {
 				bodyParams := map[string]interface{}{
 					"instance": instance,
 				}
-				url := strings.Replace(REGISTERINSTANCE, ":serviceId", serviceId, 1)
+				url := strings.Replace(REGISTERINSTANCE, ":serviceId", providerID, 1)
 				body, _ := json.Marshal(bodyParams)
 				bodyBuf := bytes.NewReader(body)
 				req, _ := http.NewRequest(POST, SCURL+url, bodyBuf)
@@ -240,13 +267,13 @@ var _ = Describe("MicroService Api Test", func() {
 
 				// Validate the instance registration
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				serviceInst := gojson.Json(string(respbody)).Get("instanceId").Tostring()
 
 				//Verify the instanceID is different for two instance
 				Expect(serviceInst).NotTo(Equal(serviceInstanceID))
 				//Delete Instance
-				url = strings.Replace(UNREGISTERINSTANCE, ":serviceId", serviceId, 1)
+				url = strings.Replace(UNREGISTERINSTANCE, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInst, 1)
 				req, _ = http.NewRequest(DELETE, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
@@ -259,9 +286,9 @@ var _ = Describe("MicroService Api Test", func() {
 			It("Find Micro-service Info by AppID", func() {
 				req, _ := http.NewRequest(GET, SCURL+FINDINSTANCE+"?appId="+serviceAppId+"&serviceName="+serviceName+"&version="+serviceVersion, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				servicesStruct := map[string][]map[string]interface{}{}
 				json.Unmarshal(respbody, &servicesStruct)
@@ -273,23 +300,55 @@ var _ = Describe("MicroService Api Test", func() {
 					}
 				}
 				Expect(foundMicroServiceInstance).To(Equal(true))
+
+				// wait dep handle
+				time.Sleep(3 * time.Second)
+
+				//Get Provider by ConsumerID
+				url := strings.Replace(GETCONPRODEPENDENCY, ":consumerId", consumerID, 1)
+				req, _ = http.NewRequest(GET, SCURL+url, nil)
+				req.Header.Set("X-Domain-Name", "default")
+				resp, _ = scclient.Do(req)
+				respbody, _ = io.ReadAll(resp.Body)
+				Expect(resp.StatusCode).To(Equal(http.StatusOK))
+				respStruct := map[string][]map[string]interface{}{}
+				json.Unmarshal(respbody, &respStruct)
+				Expect(providerID).To(Equal(respStruct["providers"][0]["serviceId"]))
+
+				//Get Consumer by ProviderID
+				url = strings.Replace(GETPROCONDEPENDENCY, ":providerId", providerID, 1)
+				req, _ = http.NewRequest(GET, SCURL+url, nil)
+				req.Header.Set("X-Domain-Name", "default")
+				resp, _ = scclient.Do(req)
+				respbody, _ = io.ReadAll(resp.Body)
+				Expect(resp.StatusCode).To(Equal(http.StatusOK))
+				respStruct = map[string][]map[string]interface{}{}
+				json.Unmarshal(respbody, &respStruct)
+				found := false
+				for _, c := range respStruct["consumers"] {
+					if c["serviceId"] == consumerID {
+						found = true
+						break
+					}
+				}
+				Expect(true).To(Equal(found))
 			})
 
 			It("Find Micro-service Info by invalid AppID", func() {
 				req, _ := http.NewRequest(GET, SCURL+FINDINSTANCE+"?appId=XXXX&serviceName="+serviceName+"&version="+serviceVersion, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
 				Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			})
 
 			It("Find Micro-Service Instance by ServiceID", func() {
-				url := strings.Replace(GETINSTANCE, ":serviceId", serviceId, 1)
-				req, _ := http.NewRequest(GET, SCURL+url, nil)
+				url := strings.Replace(GETINSTANCE, ":serviceId", providerID, 1)
+				req, _ := http.NewRequest(GET, SCURL+url+"?noCache=true", nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				servicesStruct := map[string][]map[string]interface{}{}
 				json.Unmarshal(respbody, &servicesStruct)
@@ -307,19 +366,19 @@ var _ = Describe("MicroService Api Test", func() {
 				url := strings.Replace(GETINSTANCE, ":serviceId", "XX", 1)
 				req, _ := http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
 				Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			})
 
 			It("Find MicroServiceInstance with Service and IstanceID", func() {
-				url := strings.Replace(GETINSTANCEBYINSTANCEID, ":serviceId", serviceId, 1)
+				url := strings.Replace(GETINSTANCEBYINSTANCEID, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInstanceID, 1)
 				req, _ := http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				servicesStruct := map[string]map[string]interface{}{}
 				json.Unmarshal(respbody, &servicesStruct)
@@ -328,30 +387,49 @@ var _ = Describe("MicroService Api Test", func() {
 			})
 
 			It("Find Micro-Service Instance by Invalid InstanceID", func() {
-				url := strings.Replace(GETINSTANCEBYINSTANCEID, ":serviceId", serviceId, 1)
+				url := strings.Replace(GETINSTANCEBYINSTANCEID, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", "XX", 1)
 				req, _ := http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
 				Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
+			})
+
+			It("Find Micro-service Info by alias", func() {
+				req, _ := http.NewRequest(GET, SCURL+FINDINSTANCE+"?noCache=true&appId="+serviceAppId+"&serviceName="+alias+"&version="+serviceVersion, nil)
+				req.Header.Set("X-Domain-Name", "default")
+				req.Header.Set("X-ConsumerId", consumerID)
+				resp, _ := scclient.Do(req)
+				respbody, _ := io.ReadAll(resp.Body)
+				Expect(resp.StatusCode).To(Equal(http.StatusOK))
+				servicesStruct := map[string][]map[string]interface{}{}
+				json.Unmarshal(respbody, &servicesStruct)
+				foundMicroServiceInstance := false
+				for _, services := range servicesStruct["instances"] {
+					if services["instanceId"] == serviceInstanceID {
+						foundMicroServiceInstance = true
+						break
+					}
+				}
+				Expect(foundMicroServiceInstance).To(Equal(true))
 			})
 
 			It("Find Micro-Service Instance with rev", func() {
 				req, _ := http.NewRequest(GET, SCURL+FINDINSTANCE+"?appId="+serviceAppId+"&serviceName="+serviceName+"&version="+serviceVersion, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
-				ioutil.ReadAll(resp.Body)
+				io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				rev := resp.Header.Get("X-Resource-Revision")
 				Expect(rev).NotTo(BeEmpty())
 
 				req, _ = http.NewRequest(GET, SCURL+FINDINSTANCE+"?appId="+serviceAppId+"&serviceName="+serviceName+"&version="+serviceVersion+"&rev="+rev, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ = scclient.Do(req)
-				ioutil.ReadAll(resp.Body)
+				io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusNotModified))
 				rev = resp.Header.Get("X-Resource-Revision")
 				Expect(rev).NotTo(BeEmpty())
@@ -374,13 +452,13 @@ var _ = Describe("MicroService Api Test", func() {
 				}
 				notExistsInstance := map[string]interface{}{
 					"instance": map[string]interface{}{
-						"serviceId":  serviceId,
+						"serviceId":  providerID,
 						"instanceId": "notexisted",
 					},
 				}
 				providerInstance := map[string]interface{}{
 					"instance": map[string]interface{}{
-						"serviceId":  serviceId,
+						"serviceId":  providerID,
 						"instanceId": serviceInstanceID,
 					},
 				}
@@ -398,17 +476,17 @@ var _ = Describe("MicroService Api Test", func() {
 
 				req, _ := http.NewRequest(POST, SCURL+INSTANCEACTION, bytes.NewReader(body))
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ := scclient.Do(req)
-				ioutil.ReadAll(resp.Body)
+				io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 
 				bodyBuf := bytes.NewReader(body)
 				req, _ = http.NewRequest(POST, SCURL+INSTANCEACTION+"?type=query", bodyBuf)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ = scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				respStruct := map[string]map[string][]map[string]interface{}{}
 				json.Unmarshal(respbody, &respStruct)
@@ -453,7 +531,7 @@ var _ = Describe("MicroService Api Test", func() {
 				bodyParams := map[string]interface{}{
 					"properties": propertiesInstance,
 				}
-				url := strings.Replace(UPDATEINSTANCEMETADATA, ":serviceId", serviceId, 1)
+				url := strings.Replace(UPDATEINSTANCEMETADATA, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInstanceID, 1)
 				body, _ := json.Marshal(bodyParams)
 				bodyBuf := bytes.NewReader(body)
@@ -467,12 +545,12 @@ var _ = Describe("MicroService Api Test", func() {
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 				//Verify the updated properties
-				url = strings.Replace(GETINSTANCE, ":serviceId", serviceId, 1)
+				url = strings.Replace(GETINSTANCE, ":serviceId", providerID, 1)
 				req, _ = http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ = scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				servicesStruct := map[string][]map[string]interface{}{}
 				json.Unmarshal(respbody, &servicesStruct)
@@ -492,7 +570,7 @@ var _ = Describe("MicroService Api Test", func() {
 				bodyParams := map[string]interface{}{
 					"properties": propertiesInstance,
 				}
-				url := strings.Replace(UPDATEINSTANCEMETADATA, ":serviceId", serviceId, 1)
+				url := strings.Replace(UPDATEINSTANCEMETADATA, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", "WRONGINSTANCEID", 1)
 				body, _ := json.Marshal(bodyParams)
 				bodyBuf := bytes.NewReader(body)
@@ -506,7 +584,7 @@ var _ = Describe("MicroService Api Test", func() {
 			})
 
 			It("Update Micro-Service Instance Status", func() {
-				url := strings.Replace(UPDATEINSTANCESTATUS, ":serviceId", serviceId, 1)
+				url := strings.Replace(UPDATEINSTANCESTATUS, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInstanceID, 1)
 				req, _ := http.NewRequest(UPDATE, SCURL+url+"?value=DOWN", nil)
 				req.Header.Set("X-Domain-Name", "default")
@@ -518,12 +596,12 @@ var _ = Describe("MicroService Api Test", func() {
 				time.Sleep(time.Second)
 
 				//Verify the Instance Status
-				url = strings.Replace(GETINSTANCE, ":serviceId", serviceId, 1)
+				url = strings.Replace(GETINSTANCE, ":serviceId", providerID, 1)
 				req, _ = http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ = scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				servicesStruct := map[string][]map[string]interface{}{}
 				json.Unmarshal(respbody, &servicesStruct)
@@ -538,7 +616,7 @@ var _ = Describe("MicroService Api Test", func() {
 			})
 
 			It("Update Micro-Service Instance Status with invalid Status", func() {
-				url := strings.Replace(UPDATEINSTANCESTATUS, ":serviceId", serviceId, 1)
+				url := strings.Replace(UPDATEINSTANCESTATUS, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInstanceID, 1)
 				req, _ := http.NewRequest(UPDATE, SCURL+url+"?value=INVALID", nil)
 				req.Header.Set("X-Domain-Name", "default")
@@ -549,12 +627,12 @@ var _ = Describe("MicroService Api Test", func() {
 				Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 
 				//Verify the Instance Status does not change the value
-				url = strings.Replace(GETINSTANCE, ":serviceId", serviceId, 1)
+				url = strings.Replace(GETINSTANCE, ":serviceId", providerID, 1)
 				req, _ = http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
-				req.Header.Set("X-ConsumerId", serviceId)
+				req.Header.Set("X-ConsumerId", consumerID)
 				resp, _ = scclient.Do(req)
-				respbody, _ := ioutil.ReadAll(resp.Body)
+				respbody, _ := io.ReadAll(resp.Body)
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				servicesStruct := map[string][]map[string]interface{}{}
 				json.Unmarshal(respbody, &servicesStruct)
@@ -570,7 +648,7 @@ var _ = Describe("MicroService Api Test", func() {
 
 		By("Micro-Service Instance heartbeat API", func() {
 			It("Send HeartBeat for micro-service instance", func() {
-				url := strings.Replace(INSTANCEHEARTBEAT, ":serviceId", serviceId, 1)
+				url := strings.Replace(INSTANCEHEARTBEAT, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", serviceInstanceID, 1)
 				req, _ := http.NewRequest(UPDATE, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
@@ -582,7 +660,7 @@ var _ = Describe("MicroService Api Test", func() {
 			})
 
 			It("Send HeartBeat for wrong micro-service instance", func() {
-				url := strings.Replace(INSTANCEHEARTBEAT, ":serviceId", serviceId, 1)
+				url := strings.Replace(INSTANCEHEARTBEAT, ":serviceId", providerID, 1)
 				url = strings.Replace(url, ":instanceId", "XXX", 1)
 				req, _ := http.NewRequest(UPDATE, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
@@ -598,7 +676,7 @@ var _ = Describe("MicroService Api Test", func() {
 			It("Call the watcher API ", func() {
 				//This api gives 400 bad request for the integration test
 				// as integration test is not able to make ws connection
-				url := strings.Replace(INSTANCEWATCHER, ":serviceId", serviceId, 1)
+				url := strings.Replace(INSTANCEWATCHER, ":serviceId", providerID, 1)
 				req, _ := http.NewRequest(GET, SCURL+url, nil)
 				req.Header.Set("X-Domain-Name", "default")
 				resp, err := scclient.Do(req)
@@ -609,7 +687,6 @@ var _ = Describe("MicroService Api Test", func() {
 			})
 		})
 	})
-
 })
 
 func BenchmarkRegisterMicroServiceInstance(b *testing.B) {
@@ -638,7 +715,7 @@ func BenchmarkRegisterMicroServiceInstance(b *testing.B) {
 
 	// Validate the service creation
 	Expect(resp.StatusCode).To(Equal(http.StatusOK))
-	respbody, _ := ioutil.ReadAll(resp.Body)
+	respbody, _ := io.ReadAll(resp.Body)
 	serviceId := gojson.Json(string(respbody)).Get("serviceId").Tostring()
 	Expect(len(serviceId)).Should(BeNumerically("==", LengthUUID))
 
@@ -678,7 +755,7 @@ func BenchmarkRegisterMicroServiceInstance(b *testing.B) {
 
 		// Validate the instance registration
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
-		respbody, _ = ioutil.ReadAll(resp.Body)
+		respbody, _ = io.ReadAll(resp.Body)
 		serviceInstanceID := gojson.Json(string(respbody)).Get("instanceId").Tostring()
 		Expect(len(serviceId)).Should(BeNumerically("==", LengthUUID))
 
@@ -722,7 +799,7 @@ func BenchmarkInstanceWatch(t *testing.B) {
 		resp, err := scclient.Do(req)
 		assert.NoError(t, err)
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		respbody, _ := ioutil.ReadAll(resp.Body)
+		respbody, _ := io.ReadAll(resp.Body)
 		serviceId = gojson.Json(string(respbody)).Get("serviceId").Tostring()
 		resp.Body.Close()
 
@@ -745,7 +822,7 @@ func BenchmarkInstanceWatch(t *testing.B) {
 		req.Header.Set("X-Domain-Name", "default")
 		resp, err = scclient.Do(req)
 		assert.NoError(t, err)
-		respbody, _ = ioutil.ReadAll(resp.Body)
+		respbody, _ = io.ReadAll(resp.Body)
 		instanceId = gojson.Json(string(respbody)).Get("instanceId").Tostring()
 		resp.Body.Close()
 

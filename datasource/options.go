@@ -17,12 +17,31 @@
 
 package datasource
 
-//Options contains configuration for plugins
+import (
+	"crypto/tls"
+	"time"
+
+	"github.com/go-chassis/openlog"
+)
+
+// Options contains configuration for plugins
 type Options struct {
-	Kind           Kind
-	SslEnabled     bool
-	SchemaEditable bool
+	// Kind plugin kind, can be 'etcd' or 'mongo'
+	Kind string `json:"-"`
+	// Logger logger for adapter, by default use openlog.GetLogger()
+	Logger     openlog.Logger `json:"-"`
+	SslEnabled bool           `json:"-"`
+	TLSConfig  *tls.Config    `json:"-"`
+	// ErrorFunc called when connection error occurs
+	ErrorFunc func(err error) `json:"-"`
+	// ConnectedFunc called when connected
+	ConnectedFunc func() `json:"-"`
+
+	// CompactInterval optional, compact backend
+	CompactInterval   time.Duration `json:"-"`
+	CompactIndexDelta int64         `json:"-"`
+
+	EnableCache bool
 	// InstanceTTL: the default ttl of instance lease
 	InstanceTTL int64
-	// TODO: pay attention to more net config like TLSConfig when coding
 }

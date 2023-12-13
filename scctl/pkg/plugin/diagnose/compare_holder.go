@@ -1,17 +1,19 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package diagnose
 
@@ -19,11 +21,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/parser"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/value"
 	"github.com/apache/servicecomb-service-center/pkg/dump"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
-	"github.com/coreos/etcd/mvcc/mvccpb"
 	pb "github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/foundation/gopool"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
 type CompareHolder interface {
@@ -32,7 +35,7 @@ type CompareHolder interface {
 
 type DataStore struct {
 	Data       []*mvccpb.KeyValue
-	DataParser value.Parser
+	DataParser parser.Parser
 }
 
 func (d *DataStore) ForEach(f func(i int, v *dump.KV) bool) {
@@ -77,7 +80,7 @@ func (h *abstractCompareHolder) Compare() *CompareResult {
 		del    []string
 	)
 
-	gopool.New(context.Background(), gopool.Configure().Workers(3)).
+	gopool.New(gopool.Configure().Workers(5)).
 		Do(func(_ context.Context) {
 			left := h.toMap(h.Cache)
 			leftCh <- left

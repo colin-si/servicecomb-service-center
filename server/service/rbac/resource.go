@@ -18,11 +18,18 @@
 package rbac
 
 import (
+	"fmt"
+	"strings"
+
+	"github.com/apache/servicecomb-service-center/pkg/log"
+	"github.com/apache/servicecomb-service-center/server/config"
+	mapset "github.com/deckarep/golang-set"
 	"github.com/go-chassis/cari/rbac"
 )
 
 const (
 	ResourceAccount = "account"
+	ResourceConfig  = "config"
 	ResourceRole    = "role"
 	ResourceService = "service"
 	ResourceGovern  = "governance"
@@ -32,8 +39,11 @@ const (
 
 var (
 	APITokenGranter = "/v4/token"
+	APISelfPerms    = "/v4/self-perms"
 
 	APIAccountList = "/v4/accounts"
+
+	APIAccountLockList = "/v4/account-locks"
 
 	APIRoleList = "/v4/roles"
 
@@ -64,22 +74,22 @@ var (
 	APIServiceRuleList = "/v4/:project/registry/microservices/:serviceId/rules/rule_id"
 
 	APIServiceSchema = "/v4/:project/registry/microservices/:serviceId/schemas"
+
+	authResources = map[string]struct{}{}
+
+	whiteAPIList = mapset.NewSet()
 )
 
 func InitResourceMap() {
 	rbac.PartialMapResource(APIAccountList, ResourceAccount)
-
 	rbac.PartialMapResource(APIRoleList, ResourceRole)
-
 	rbac.PartialMapResource(APIGov, ResourceGovern)
-
 	rbac.PartialMapResource(APIServiceSchema, ResourceSchema)
-
 	rbac.PartialMapResource(APIOps, ResourceOps)
-
 	rbac.PartialMapResource("instances", ResourceService)
 	rbac.PartialMapResource(APILegacyGov, ResourceService)
 
+	rbac.MapResource(APIAccountLockList, ResourceAccount)
 	rbac.MapResource(APIServiceInfo, ResourceService)
 	rbac.MapResource(APIServicesList, ResourceService)
 	rbac.MapResource(APIServiceProperties, ResourceService)
@@ -93,4 +103,49 @@ func InitResourceMap() {
 	rbac.MapResource(APIServiceRule, ResourceService)
 	rbac.MapResource(APIServiceTag, ResourceService)
 	rbac.MapResource(APIServiceTagKey, ResourceService)
+
+	initAuthResources()
+}
+
+func initAuthResources() {
+	// scope MUST contain role and account resources
+	scopes := strings.Split(config.GetString("rbac.scope", "*")+",role,account", ",")
+	for _, scope := range scopes {
+		if scope == "*" {
+			authResources = map[string]struct{}{}
+			break
+		}
+		authResources[scope] = struct{}{}
+	}
+	log.Info(fmt.Sprintf("init must auth resources: %v", authResources))
+}
+
+func AuthResource(resource string) bool {
+	if len(authResources) == 0 {
+		return true
+	}
+	_, ok := authResources[resource]
+	return ok
+}
+
+func MustAuth(apiPattern string) bool {
+	found := true
+	if len(authResources) > 0 {
+		resource := rbac.GetResource(apiPattern)
+		_, found = authResources[resource]
+	}
+	if !found {
+		return false
+	}
+	return rbac.MustAuth(apiPattern)
+}
+
+func Add2CheckPermWhiteAPIList(path ...string) {
+	for _, p := range path {
+		whiteAPIList.Add(p)
+	}
+}
+
+func MustCheckPerm(apiPattern string) bool {
+	return !whiteAPIList.Contains(apiPattern)
 }

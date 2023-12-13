@@ -14,9 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package bootstrap
 
 import (
+	//cari db
+	_ "github.com/go-chassis/cari/db/bootstrap"
+
+	//eventbase
+	_ "github.com/apache/servicecomb-service-center/eventbase/bootstrap"
+
 	//etcd
 	_ "github.com/apache/servicecomb-service-center/datasource/etcd/bootstrap"
 
@@ -49,23 +56,23 @@ import (
 	//tlsconf
 	_ "github.com/apache/servicecomb-service-center/server/plugin/security/tlsconf/buildin"
 
-	//module 'govern'
-	_ "github.com/apache/servicecomb-service-center/server/rest/govern"
-
 	//module 'admin'
 	_ "github.com/apache/servicecomb-service-center/server/rest/admin"
 
-	//module 'syncer'
-	_ "github.com/apache/servicecomb-service-center/server/rest/syncer"
-
 	//governance
-	_ "github.com/apache/servicecomb-service-center/server/service/gov/kie"
+	_ "github.com/apache/servicecomb-service-center/server/service/grc/kie"
 
 	//metrics
 	_ "github.com/apache/servicecomb-service-center/server/rest/metrics"
 
+	//jobs
+	_ "github.com/apache/servicecomb-service-center/server/job/account"
+	_ "github.com/apache/servicecomb-service-center/server/job/disco"
+
+	//dlock
+	_ "github.com/go-chassis/cari/dlock/bootstrap"
+
 	"github.com/apache/servicecomb-service-center/pkg/log"
-	"github.com/apache/servicecomb-service-center/server/broker"
 	"github.com/apache/servicecomb-service-center/server/handler/accesslog"
 	"github.com/apache/servicecomb-service-center/server/handler/auth"
 	"github.com/apache/servicecomb-service-center/server/handler/context"
@@ -95,7 +102,4 @@ func init() {
 	metrics.RegisterHandlers()
 	tracing.RegisterHandlers()
 	route.RegisterHandlers()
-
-	// init broker
-	broker.Init()
 }

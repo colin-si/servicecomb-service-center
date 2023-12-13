@@ -18,41 +18,65 @@
 package datasource
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/go-chassis/cari/dlock"
+
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
+	"github.com/apache/servicecomb-service-center/datasource/schema"
+	"github.com/apache/servicecomb-service-center/eventbase/datasource"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 )
 
 type dataSourceEngine func(opts Options) (DataSource, error)
 
 var (
-	plugins        = make(map[Kind]dataSourceEngine)
+	plugins        = make(map[string]dataSourceEngine)
 	dataSourceInst DataSource
 )
 
 // load plugins configuration into plugins
 func Install(pluginImplName string, engineFunc dataSourceEngine) {
-	plugins[Kind(pluginImplName)] = engineFunc
+	plugins[pluginImplName] = engineFunc
 }
 
-// construct storage plugin instance
+// Init construct storage plugin instance
 // invoked by sc main process
-/* Usage:
- * interval, err := time.ParseDuration(core.ServerInfo.Config.CompactInterval)
- * if err != nil {
- * 	log.Errorf(err, "invalid compact interval %s, reset to default interval 12h", core.ServerInfo.Config.CompactInterval)
- * 	interval = 12 * time.Hour
- * }
- * Init(Options{
- * 	CompactIndexDelta:    core.ServerInfo.Config.CompactIndexDelta,
- * 	CompactInterval:      interval,
- * })
- */
 func Init(opts Options) error {
 	if opts.Kind == "" {
 		return nil
 	}
 
+	err := initDatasource(opts)
+	if err != nil {
+		return err
+	}
+	err = GetSyncManager().SyncAll(context.Background())
+	if err != nil && err != ErrSyncAllKeyExists {
+		return err
+	}
+	err = schema.Init(schema.Options{Kind: opts.Kind})
+	if err != nil {
+		return err
+	}
+	err = rbac.Init(rbac.Options{Kind: opts.Kind})
+	if err != nil {
+		return err
+	}
+	err = dlock.Init(dlock.Options{Kind: opts.Kind})
+	if err != nil {
+		return err
+	}
+	// init eventbase
+	err = datasource.Init(&datasource.Config{
+		Kind:   opts.Kind,
+		Logger: log.Logger,
+	})
+	return err
+}
+
+func initDatasource(opts Options) error {
 	dataSourceEngine, ok := plugins[opts.Kind]
 	if !ok {
 		return fmt.Errorf("plugin implement not supported [%s]", opts.Kind)
@@ -75,12 +99,12 @@ func GetMetadataManager() MetadataManager {
 func GetSystemManager() SystemManager {
 	return dataSourceInst.SystemManager()
 }
-func GetRoleManager() RoleManager {
-	return dataSourceInst.RoleManager()
-}
-func GetAccountManager() AccountManager {
-	return dataSourceInst.AccountManager()
-}
 func GetDependencyManager() DependencyManager {
 	return dataSourceInst.DependencyManager()
+}
+func GetMetricsManager() MetricsManager {
+	return dataSourceInst.MetricsManager()
+}
+func GetSyncManager() SyncManager {
+	return dataSourceInst.SyncManager()
 }

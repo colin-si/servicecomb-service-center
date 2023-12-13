@@ -24,9 +24,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
+	"github.com/apache/servicecomb-service-center/pkg/goutil"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/go-chassis/foundation/gopool"
 )
 
 const (
@@ -46,7 +47,7 @@ type FastRegisterTimeTask struct {
 
 func NewRegisterTimeTask() *FastRegisterTimeTask {
 	return &FastRegisterTimeTask{
-		goroutine: gopool.New(context.Background()),
+		goroutine: goutil.New(),
 	}
 }
 
@@ -135,7 +136,7 @@ func (rt *FastRegisterTimeTask) RegisterInstancesAsync(events []*InstanceRegiste
 	ctx, cancel := context.WithTimeout(context.Background(), ctxCancelTimeOut)
 	defer cancel()
 
-	_, err := RegisterInstanceBatch(ctx, events)
+	err := RegisterInstanceBatch(ctx, events)
 
 	count := <-failedCount
 
@@ -160,7 +161,6 @@ func (rt *FastRegisterTimeTask) RegisterInstance(event *InstanceRegisterEvent, b
 	defer cancel()
 
 	_, err := RegisterInstanceSingle(event.Ctx, event.Request, event.isCustomID)
-
 	if err != nil {
 		log.Error(fmt.Sprintf("register instance:%s failed again, failed times:%d",
 			event.Request.Instance.InstanceId, event.failedTime), err)

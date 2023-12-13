@@ -20,60 +20,73 @@ package rbac
 import (
 	"context"
 	"errors"
+	"fmt"
 
-	"github.com/go-chassis/cari/discovery"
-	"github.com/go-chassis/cari/rbac"
-
-	"github.com/apache/servicecomb-service-center/datasource"
+	"github.com/apache/servicecomb-service-center/datasource/rbac"
 	errorsEx "github.com/apache/servicecomb-service-center/pkg/errors"
 	"github.com/apache/servicecomb-service-center/pkg/log"
-	"github.com/apache/servicecomb-service-center/pkg/util"
-	"github.com/apache/servicecomb-service-center/server/plugin/quota"
+	quotasvc "github.com/apache/servicecomb-service-center/server/service/quota"
 	"github.com/apache/servicecomb-service-center/server/service/validator"
+	"github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/cari/dlock"
+	rbacmodel "github.com/go-chassis/cari/rbac"
 )
 
-func CreateRole(ctx context.Context, r *rbac.Role) error {
+const isMigrated = "/cse-sr/role-migrated-lock"
+
+func CreateRole(ctx context.Context, r *rbacmodel.Role) error {
 	err := validator.ValidateCreateRole(r)
 	if err != nil {
-		log.Errorf(err, "create role [%s] failed", r.Name)
+		log.Error(fmt.Sprintf("create role [%s] failed", r.Name), err)
 		return discovery.NewError(discovery.ErrInvalidParams, err.Error())
 	}
-	quotaErr := quota.Apply(ctx, quota.NewApplyQuotaResource(quota.TypeRole,
-		util.ParseDomainProject(ctx), "", 1))
+	quotaErr := quotasvc.ApplyRole(ctx, 1)
 	if quotaErr != nil {
-		return rbac.NewError(rbac.ErrRoleNoQuota, quotaErr.Error())
+		return rbacmodel.NewError(rbacmodel.ErrRoleNoQuota, quotaErr.Error())
 	}
-	err = datasource.GetRoleManager().CreateRole(ctx, r)
+
+	lockKey := "/role-creating/" + r.Name
+	if err := dlock.TryLock(lockKey, -1); err != nil {
+		err = fmt.Errorf("role %s is creating, err: %s", r.Name, err.Error())
+		return discovery.NewError(discovery.ErrInvalidParams, err.Error())
+	}
+	defer func() {
+		if err := dlock.Unlock(lockKey); err != nil {
+			log.Error("unlock failed", err)
+		}
+	}()
+
+	err = rbac.Instance().CreateRole(ctx, r)
 	if err == nil {
-		log.Infof("create role [%s] success", r.Name)
+		log.Info(fmt.Sprintf("create role [%s] success", r.Name))
 		return nil
 	}
 
-	log.Errorf(err, "create role [%s] failed", r.Name)
-	if err == datasource.ErrRoleDuplicated {
-		return rbac.NewError(rbac.ErrRoleConflict, err.Error())
+	log.Error(fmt.Sprintf("create role [%s] failed", r.Name), err)
+	if err == rbac.ErrRoleDuplicated {
+		return rbacmodel.NewError(rbacmodel.ErrRoleConflict, err.Error())
 	}
 
 	return err
 }
 
-func GetRole(ctx context.Context, name string) (*rbac.Role, error) {
-	resp, err := datasource.GetRoleManager().GetRole(ctx, name)
+func GetRole(ctx context.Context, name string) (*rbacmodel.Role, error) {
+	resp, err := rbac.Instance().GetRole(ctx, name)
 	if err == nil {
 		return resp, nil
 	}
-	if err == datasource.ErrRoleNotExist {
-		return nil, rbac.NewError(rbac.ErrRoleNotExist, "")
+	if err == rbac.ErrRoleNotExist {
+		return nil, rbacmodel.NewError(rbacmodel.ErrRoleNotExist, "")
 	}
 	return nil, err
 }
 
-func ListRole(ctx context.Context) ([]*rbac.Role, int64, error) {
-	return datasource.GetRoleManager().ListRole(ctx)
+func ListRole(ctx context.Context) ([]*rbacmodel.Role, int64, error) {
+	return rbac.Instance().ListRole(ctx)
 }
 
 func RoleExist(ctx context.Context, name string) (bool, error) {
-	return datasource.GetRoleManager().RoleExist(ctx, name)
+	return rbac.Instance().RoleExist(ctx, name)
 }
 
 func DeleteRole(ctx context.Context, name string) error {
@@ -82,17 +95,17 @@ func DeleteRole(ctx context.Context, name string) error {
 	}
 	exist, err := RoleExist(ctx, name)
 	if err != nil {
-		log.Errorf(err, "check role [%s] exist failed", name)
+		log.Error(fmt.Sprintf("check role [%s] exist failed", name), err)
 		return err
 	}
 	if !exist {
-		log.Errorf(err, "role [%s] not exist", name)
-		return rbac.NewError(rbac.ErrRoleNotExist, "")
+		log.Error(fmt.Sprintf("role [%s] not exist", name), err)
+		return rbacmodel.NewError(rbacmodel.ErrRoleNotExist, "")
 	}
-	succeed, err := datasource.GetRoleManager().DeleteRole(ctx, name)
+	succeed, err := rbac.Instance().DeleteRole(ctx, name)
 	if err != nil {
-		if errors.Is(err, datasource.ErrRoleBindingExist) {
-			return rbac.NewError(rbac.ErrRoleIsBound, "")
+		if errors.Is(err, rbac.ErrRoleBindingExist) {
+			return rbacmodel.NewError(rbacmodel.ErrRoleIsBound, "")
 		}
 		return err
 	}
@@ -102,39 +115,66 @@ func DeleteRole(ctx context.Context, name string) error {
 	return nil
 }
 
-func EditRole(ctx context.Context, name string, a *rbac.Role) error {
+func EditRole(ctx context.Context, name string, a *rbacmodel.Role) error {
 	if err := illegalRoleCheck(name); err != nil {
 		return err
 	}
 	exist, err := RoleExist(ctx, name)
 	if err != nil {
-		log.Errorf(err, "check role [%s] exist failed", name)
+		log.Error(fmt.Sprintf("check role [%s] exist failed", name), err)
 		return err
 	}
 	if !exist {
-		log.Errorf(err, "role [%s] not exist", name)
-		return rbac.NewError(rbac.ErrRoleNotExist, "")
+		log.Error(fmt.Sprintf("role [%s] not exist", name), err)
+		return rbacmodel.NewError(rbacmodel.ErrRoleNotExist, "")
 	}
 	oldRole, err := GetRole(ctx, name)
 	if err != nil {
-		log.Errorf(err, "get role [%s] failed", name)
+		log.Error(fmt.Sprintf("get role [%s] failed", name), err)
 		return err
 	}
 
 	oldRole.Perms = a.Perms
 
-	err = datasource.GetRoleManager().UpdateRole(ctx, name, oldRole)
+	err = rbac.Instance().UpdateRole(ctx, name, oldRole)
 	if err != nil {
-		log.Errorf(err, "can not edit role info")
+		log.Error("can not edit role info", err)
 		return err
 	}
-	log.Infof("role [%s] is edit", oldRole.ID)
+	log.Info(fmt.Sprintf("role [%s] is edit", oldRole.ID))
 	return nil
 }
 
 func illegalRoleCheck(role string) error {
-	if role == rbac.RoleAdmin || role == rbac.RoleDeveloper {
-		return rbac.NewError(rbac.ErrForbidOperateBuildInRole, errorsEx.MsgCantOperateBuildInRole)
+	if role == rbacmodel.RoleAdmin || role == rbacmodel.RoleDeveloper {
+		return rbacmodel.NewError(rbacmodel.ErrForbidOperateBuildInRole, errorsEx.MsgCantOperateBuildInRole)
 	}
 	return nil
+}
+
+func RoleUsage(ctx context.Context) (int64, error) {
+	_, used, err := rbac.Instance().ListRole(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return used, nil
+}
+
+func migrateOldRoles() {
+	if err := dlock.Lock(isMigrated, -1); err != nil {
+		log.Error("old role is migrating", err)
+		return
+	}
+	defer func() {
+		if err := dlock.Unlock(isMigrated); err != nil {
+			log.Error("unlock failed", err)
+		}
+	}()
+
+	err := rbac.Instance().MigrateOldRoles(context.Background())
+	if err != nil {
+		log.Error("migrate old role failed", err)
+		return
+	}
+	log.Info("migrate old role success")
 }

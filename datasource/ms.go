@@ -24,61 +24,59 @@ import (
 	pb "github.com/go-chassis/cari/discovery"
 )
 
-var ErrServiceNotExists = errors.New("service does not exist")
-var ErrInstanceNotExists = errors.New("instance does not exist")
-
 const (
-	ExistTypeMicroservice = "microservice"
-	ExistTypeSchema       = "schema"
+	ExistTypeMicroservice             = "microservice"
+	ExistTypeSchema                   = "schema"
+	DefaultLeaseRenewalInterval int32 = 30
+	DefaultLeaseRetryTimes      int32 = 3
 )
+
+var (
+	ErrServiceNotExists     = errors.New("service does not exist")
+	ErrInstanceNotExists    = errors.New("instance does not exist")
+	ErrUndefinedSchemaID    = errors.New("non-existent schemaID can't be added request")
+	ErrModifySchemaNotAllow = errors.New("schema already exist, can not be changed request")
+)
+
+type MatchPolicy struct {
+	Properties map[string]string `json:"properties,omitempty"`
+}
 
 // Attention: request validation must be finished before the following interface being invoked!!!
 // MetadataManager contains the CRUD of cache metadata
 type MetadataManager interface {
 	// Microservice management
 	RegisterService(ctx context.Context, request *pb.CreateServiceRequest) (*pb.CreateServiceResponse, error)
-	GetServices(ctx context.Context, request *pb.GetServicesRequest) (*pb.GetServicesResponse, error)
-	GetService(ctx context.Context, request *pb.GetServiceRequest) (*pb.GetServiceResponse, error)
+	ListService(ctx context.Context, request *pb.GetServicesRequest) (*pb.GetServicesResponse, error)
+	GetService(ctx context.Context, request *pb.GetServiceRequest) (*pb.MicroService, error)
 
-	GetServiceDetail(ctx context.Context, request *pb.GetServiceRequest) (*pb.GetServiceDetailResponse, error)
-	GetServicesInfo(ctx context.Context, request *pb.GetServicesInfoRequest) (*pb.GetServicesInfoResponse, error)
-	GetServicesStatistics(ctx context.Context, request *pb.GetServicesRequest) (*pb.GetServicesInfoStatisticsResponse, error)
-	GetApplications(ctx context.Context, request *pb.GetAppsRequest) (*pb.GetAppsResponse, error)
+	GetOverview(ctx context.Context, request *pb.GetServicesRequest) (*pb.Statistics, error)
+	ListApp(ctx context.Context, request *pb.GetAppsRequest) (*pb.GetAppsResponse, error)
 
 	ExistServiceByID(ctx context.Context, request *pb.GetExistenceByIDRequest) (*pb.GetExistenceByIDResponse, error)
-	ExistService(ctx context.Context, request *pb.GetExistenceRequest) (*pb.GetExistenceResponse, error)
-	UpdateService(ctx context.Context, request *pb.UpdateServicePropsRequest) (*pb.UpdateServicePropsResponse, error)
-	UnregisterService(ctx context.Context, request *pb.DeleteServiceRequest) (*pb.DeleteServiceResponse, error)
-	GetDeleteServiceFunc(ctx context.Context, serviceID string, force bool,
-		serviceRespChan chan<- *pb.DelServicesRspInfo) func(context.Context)
-	GetServiceCountByDomainProject(ctx context.Context,
-		request *pb.GetServiceCountRequest) (*pb.GetServiceCountResponse, error)
+	ExistService(ctx context.Context, request *pb.GetExistenceRequest) (string, error)
+	PutServiceProperties(ctx context.Context, request *pb.UpdateServicePropsRequest) error
+	UnregisterService(ctx context.Context, request *pb.DeleteServiceRequest) error
+	CountService(ctx context.Context, request *pb.GetServiceCountRequest) (*pb.GetServiceCountResponse, error)
+	FindService(ctx context.Context, request *pb.MicroServiceKey) (*pb.GetServicesResponse, error)
 
 	// Instance management
 	RegisterInstance(ctx context.Context, request *pb.RegisterInstanceRequest) (*pb.RegisterInstanceResponse, error)
-	ExistInstanceByID(ctx context.Context, request *pb.MicroServiceInstanceKey) (*pb.GetExistenceByIDResponse, error)
-	// GetInstances returns instances under the specified service
+	ExistInstance(ctx context.Context, request *pb.MicroServiceInstanceKey) (*pb.GetExistenceByIDResponse, error)
+	// GetInstance returns instances under the specified service
 	GetInstance(ctx context.Context, request *pb.GetOneInstanceRequest) (*pb.GetOneInstanceResponse, error)
-	GetInstances(ctx context.Context, request *pb.GetInstancesRequest) (*pb.GetInstancesResponse, error)
-	// GetProviderInstances returns instances under the specified service
-	GetProviderInstances(ctx context.Context,
-		request *pb.GetProviderInstancesRequest) (instances []*pb.MicroServiceInstance, rev string, err error)
-	// BatchGetProviderInstances returns instances under the specified services
-	BatchGetProviderInstances(ctx context.Context,
-		request *pb.BatchGetInstancesRequest) (instances []*pb.MicroServiceInstance, rev string, err error)
+	ListInstance(ctx context.Context, request *pb.GetInstancesRequest) (*pb.GetInstancesResponse, error)
 	// FindInstances returns instances under the specified domain
 	FindInstances(ctx context.Context, request *pb.FindInstancesRequest) (*pb.FindInstancesResponse, error)
-	UpdateInstanceStatus(ctx context.Context, request *pb.UpdateInstanceStatusRequest) (
-		*pb.UpdateInstanceStatusResponse, error)
-	UpdateInstanceProperties(ctx context.Context, request *pb.UpdateInstancePropsRequest) (
-		*pb.UpdateInstancePropsResponse, error)
-	UnregisterInstance(ctx context.Context, request *pb.UnregisterInstanceRequest) (*pb.UnregisterInstanceResponse,
-		error)
-	Heartbeat(ctx context.Context, request *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error)
-	HeartbeatSet(ctx context.Context, request *pb.HeartbeatSetRequest) (*pb.HeartbeatSetResponse, error)
-	BatchFind(ctx context.Context, request *pb.BatchFindInstancesRequest) (*pb.BatchFindInstancesResponse, error)
-	// GetAllInstances returns instances under the specified domain
-	GetAllInstances(ctx context.Context, request *pb.GetAllInstancesRequest) (*pb.GetAllInstancesResponse, error)
+	PutInstance(ctx context.Context, request *pb.RegisterInstanceRequest) error
+	PutInstanceStatus(ctx context.Context, request *pb.UpdateInstanceStatusRequest) error
+	PutInstanceProperties(ctx context.Context, request *pb.UpdateInstancePropsRequest) error
+	UnregisterInstance(ctx context.Context, request *pb.UnregisterInstanceRequest) error
+	SendHeartbeat(ctx context.Context, request *pb.HeartbeatRequest) error
+	SendManyHeartbeat(ctx context.Context, request *pb.HeartbeatSetRequest) (*pb.HeartbeatSetResponse, error)
+	// ListManyInstances returns instances under the specified domain
+	ListManyInstances(ctx context.Context, request *pb.GetAllInstancesRequest) (*pb.GetAllInstancesResponse, error)
+	CountInstance(ctx context.Context, request *pb.GetServiceCountRequest) (*pb.GetServiceCountResponse, error)
 
 	// Schema management
 	ModifySchemas(ctx context.Context, request *pb.ModifySchemasRequest) (*pb.ModifySchemasResponse, error)
@@ -86,17 +84,19 @@ type MetadataManager interface {
 	ExistSchema(ctx context.Context, request *pb.GetExistenceRequest) (*pb.GetExistenceResponse, error)
 	GetSchema(ctx context.Context, request *pb.GetSchemaRequest) (*pb.GetSchemaResponse, error)
 	GetAllSchemas(ctx context.Context, request *pb.GetAllSchemaRequest) (*pb.GetAllSchemaResponse, error)
-	DeleteSchema(ctx context.Context, request *pb.DeleteSchemaRequest) (*pb.DeleteSchemaResponse, error)
+	DeleteSchema(ctx context.Context, request *pb.DeleteSchemaRequest) error
 
 	// Tag management
-	AddTags(ctx context.Context, request *pb.AddServiceTagsRequest) (*pb.AddServiceTagsResponse, error)
-	GetTags(ctx context.Context, request *pb.GetServiceTagsRequest) (*pb.GetServiceTagsResponse, error)
-	UpdateTag(ctx context.Context, request *pb.UpdateServiceTagRequest) (*pb.UpdateServiceTagResponse, error)
-	DeleteTags(ctx context.Context, request *pb.DeleteServiceTagsRequest) (*pb.DeleteServiceTagsResponse, error)
+	PutManyTags(ctx context.Context, request *pb.AddServiceTagsRequest) error
+	ListTag(ctx context.Context, request *pb.GetServiceTagsRequest) (*pb.GetServiceTagsResponse, error)
+	PutTag(ctx context.Context, request *pb.UpdateServiceTagRequest) error
+	DeleteManyTags(ctx context.Context, request *pb.DeleteServiceTagsRequest) error
 
-	// White/black list management
-	AddRule(ctx context.Context, request *pb.AddServiceRulesRequest) (*pb.AddServiceRulesResponse, error)
-	GetRules(ctx context.Context, request *pb.GetServiceRulesRequest) (*pb.GetServiceRulesResponse, error)
-	UpdateRule(ctx context.Context, request *pb.UpdateServiceRuleRequest) (*pb.UpdateServiceRuleResponse, error)
-	DeleteRule(ctx context.Context, request *pb.DeleteServiceRulesRequest) (*pb.DeleteServiceRulesResponse, error)
+	// RetireService retire the 'RetirePlan.Reserve' latest versions for each of service,
+	// delete other versions which doesn't register any instances.
+	RetireService(ctx context.Context, plan *RetirePlan) error
+
+	Statistics(ctx context.Context, withShared bool) (*pb.Statistics, error)
+
+	UpdateManyInstanceStatus(ctx context.Context, match *MatchPolicy, status string) error
 }

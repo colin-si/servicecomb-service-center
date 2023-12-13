@@ -1,17 +1,19 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package servicecenter
 
@@ -24,14 +26,15 @@ import (
 	pb "github.com/go-chassis/cari/discovery"
 
 	"github.com/apache/servicecomb-service-center/datasource/etcd"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	"github.com/apache/servicecomb-service-center/pkg/dump"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/alarm"
+	"github.com/go-chassis/foundation/gopool"
 )
 
 var (
@@ -42,11 +45,11 @@ var (
 type Syncer struct {
 	Client *SCClientAggregate
 
-	cachers map[sd.Type]*Cacher
+	cachers map[kvstore.Type]*Cacher
 }
 
 func (c *Syncer) Initialize() {
-	c.cachers = make(map[sd.Type]*Cacher)
+	c.cachers = make(map[kvstore.Type]*Cacher)
 	c.Client = GetOrCreateSCClient()
 }
 
@@ -54,7 +57,7 @@ func (c *Syncer) Sync(ctx context.Context) {
 	cache, errs := c.Client.GetScCache(ctx)
 	if len(errs) > 0 {
 		err := fmt.Errorf("%v", errs)
-		log.Errorf(err, "Sync catches errors")
+		log.Error("Sync catches errors", err)
 		err = alarm.Raise(alarm.IDBackendConnectionRefuse,
 			alarm.AdditionalContext(err.Error()))
 		if err != nil {
@@ -69,41 +72,33 @@ func (c *Syncer) Sync(ctx context.Context) {
 		log.Error("", err)
 	}
 	// microservice
-	serviceCacher, ok := c.cachers[kv.SERVICE]
+	serviceCacher, ok := c.cachers[sd.TypeService]
 	if ok {
 		c.check(serviceCacher, &cache.Microservices, errs)
 	}
-	indexCacher, ok := c.cachers[kv.ServiceIndex]
+	indexCacher, ok := c.cachers[sd.TypeServiceIndex]
 	if ok {
 		c.checkWithConflictHandleFunc(indexCacher, &cache.Indexes, errs, c.logConflictFunc)
 	}
-	aliasCacher, ok := c.cachers[kv.ServiceAlias]
+	aliasCacher, ok := c.cachers[sd.TypeServiceAlias]
 	if ok {
 		c.checkWithConflictHandleFunc(aliasCacher, &cache.Aliases, errs, c.logConflictFunc)
 	}
 	// microservice meta
-	tagCacher, ok := c.cachers[kv.ServiceTag]
+	tagCacher, ok := c.cachers[sd.TypeServiceTag]
 	if ok {
 		c.check(tagCacher, &cache.Tags, errs)
 	}
-	ruleCacher, ok := c.cachers[kv.RULE]
-	if ok {
-		c.check(ruleCacher, &cache.Rules, errs)
-	}
-	ruleIndexCacher, ok := c.cachers[kv.RuleIndex]
-	if ok {
-		c.check(ruleIndexCacher, &cache.RuleIndexes, errs)
-	}
-	depRuleCacher, ok := c.cachers[kv.DependencyRule]
+	depRuleCacher, ok := c.cachers[sd.TypeDependencyRule]
 	if ok {
 		c.check(depRuleCacher, &cache.DependencyRules, errs)
 	}
-	schemaSummaryCacher, ok := c.cachers[kv.SchemaSummary]
+	schemaSummaryCacher, ok := c.cachers[sd.TypeSchemaSummary]
 	if ok {
 		c.check(schemaSummaryCacher, &cache.Summaries, errs)
 	}
 	// instance
-	instCacher, ok := c.cachers[kv.INSTANCE]
+	instCacher, ok := c.cachers[sd.TypeInstance]
 	if ok {
 		c.check(instCacher, &cache.Instances, errs)
 	}
@@ -120,7 +115,7 @@ func (c *Syncer) checkWithConflictHandleFunc(local *Cacher, remote dump.Getter, 
 		// because the result of the remote return may contain the same data as
 		// the local cache of the current SC. So we need to ignore it and
 		// prevent the aggregation result from increasing.
-		if v.ClusterName == etcd.Configuration().ClusterName {
+		if v.ClusterName == state.Configuration().ClusterName {
 			return true
 		}
 		if kv, ok := exists[v.Key]; ok {
@@ -129,7 +124,7 @@ func (c *Syncer) checkWithConflictHandleFunc(local *Cacher, remote dump.Getter, 
 		}
 		exists[v.Key] = v
 		old := local.Cache().Get(v.Key)
-		newKv := &sd.KeyValue{
+		newKv := &kvstore.KeyValue{
 			Key:         util.StringToBytesWithNoCopy(v.Key),
 			Value:       v.Value,
 			ModRevision: v.Rev,
@@ -144,8 +139,8 @@ func (c *Syncer) checkWithConflictHandleFunc(local *Cacher, remote dump.Getter, 
 			// if connect to some cluster failed, then skip to notify changes
 			// of these clusters to prevent publish the wrong changes events of kvs.
 			if err, ok := skipClusters[old.ClusterName]; ok {
-				log.Errorf(err, "cluster[%s] temporarily unavailable, skip cluster[%s] event %s %s",
-					old.ClusterName, v.ClusterName, pb.EVT_UPDATE, v.Key)
+				log.Error(fmt.Sprintf("cluster[%s] temporarily unavailable, skip cluster[%s] event %s %s",
+					old.ClusterName, v.ClusterName, pb.EVT_UPDATE, v.Key), err)
 				break
 			}
 			newKv.Version = 1 + old.Version
@@ -155,11 +150,11 @@ func (c *Syncer) checkWithConflictHandleFunc(local *Cacher, remote dump.Getter, 
 		return true
 	})
 
-	var deletes []*sd.KeyValue
-	local.Cache().ForEach(func(key string, v *sd.KeyValue) (next bool) {
+	var deletes []*kvstore.KeyValue
+	local.Cache().ForEach(func(key string, v *kvstore.KeyValue) (next bool) {
 		var exist bool
 		remote.ForEach(func(_ int, v *dump.KV) bool {
-			if v.ClusterName == etcd.Configuration().ClusterName {
+			if v.ClusterName == state.Configuration().ClusterName {
 				return true
 			}
 			exist = v.Key == key
@@ -167,8 +162,8 @@ func (c *Syncer) checkWithConflictHandleFunc(local *Cacher, remote dump.Getter, 
 		})
 		if !exist {
 			if err, ok := skipClusters[v.ClusterName]; ok {
-				log.Errorf(err, "cluster[%s] temporarily unavailable, skip event %s %s",
-					v.ClusterName, pb.EVT_DELETE, v.Key)
+				log.Error(fmt.Sprintf("cluster[%s] temporarily unavailable, skip event %s %s",
+					v.ClusterName, pb.EVT_DELETE, v.Key), err)
 				return true
 			}
 			deletes = append(deletes, v)
@@ -190,28 +185,29 @@ func (c *Syncer) logConflictFunc(origin *dump.KV, conflict dump.Getter, index in
 		keyValue := (*slice)[index]
 		if serviceID := origin.Value.(string); keyValue.Value != serviceID {
 			key := path.GetInfoFromSvcIndexKV(util.StringToBytesWithNoCopy(keyValue.Key))
-			log.Warnf("conflict! can not merge microservice index[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
+			log.Warn(fmt.Sprintf("conflict! can not merge microservice index[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
 				keyValue.ClusterName, keyValue.Value, key.Environment, key.AppId, key.ServiceName, key.Version,
-				serviceID, origin.ClusterName)
+				serviceID, origin.ClusterName))
 		}
 	case *dump.MicroserviceAliasSlice:
 		slice := conflict.(*dump.MicroserviceAliasSlice)
 		keyValue := (*slice)[index]
 		if serviceID := origin.Value.(string); keyValue.Value != serviceID {
 			key := path.GetInfoFromSvcAliasKV(util.StringToBytesWithNoCopy(keyValue.Key))
-			log.Warnf("conflict! can not merge microservice alias[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
+			log.Warn(fmt.Sprintf("conflict! can not merge microservice alias[%s][%s][%s/%s/%s/%s], found one[%s] in cluster[%s]",
 				keyValue.ClusterName, keyValue.Value, key.Environment, key.AppId, key.ServiceName, key.Version,
-				serviceID, origin.ClusterName)
+				serviceID, origin.ClusterName))
 		}
 	}
 }
 
 func (c *Syncer) loop(ctx context.Context) {
+	cfg := etcd.Configuration()
 	select {
 	case <-ctx.Done():
 	case <-time.After(minWaitInterval):
 		c.Sync(ctx)
-		d := etcd.Configuration().AutoSyncInterval
+		d := cfg.AutoSyncInterval
 		if d == 0 {
 			return
 		}
@@ -231,7 +227,7 @@ func (c *Syncer) loop(ctx context.Context) {
 }
 
 // unsafe
-func (c *Syncer) AddCacher(t sd.Type, cacher *Cacher) {
+func (c *Syncer) AddCacher(t kvstore.Type, cacher *Cacher) {
 	c.cachers[t] = cacher
 }
 

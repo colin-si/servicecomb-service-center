@@ -3,12 +3,12 @@
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except request compliance with
+ * (the "License"); you may not use this file except in compliance with
  * the License.  You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to request writing, software
+ * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
@@ -25,41 +25,35 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/apache/servicecomb-service-center/syncer/service/event"
 	pb "github.com/go-chassis/cari/discovery"
 	"github.com/go-chassis/cari/pkg/errsvc"
-	"github.com/jinzhu/copier"
+	"github.com/go-chassis/cari/sync"
+	"github.com/go-chassis/foundation/gopool"
+	"github.com/little-cui/etcdadpt"
 
 	"github.com/apache/servicecomb-service-center/datasource"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/cache"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	registry "github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
+	esync "github.com/apache/servicecomb-service-center/datasource/etcd/sync"
+	eutil "github.com/apache/servicecomb-service-center/datasource/etcd/util"
 	serviceUtil "github.com/apache/servicecomb-service-center/datasource/etcd/util"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
+	"github.com/apache/servicecomb-service-center/datasource/schema"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/core"
-	"github.com/apache/servicecomb-service-center/server/plugin/quota"
 	"github.com/apache/servicecomb-service-center/server/plugin/uuid"
+	quotasvc "github.com/apache/servicecomb-service-center/server/service/quota"
 )
 
 type MetadataManager struct {
-	// SchemaEditable determines whether schema modification is allowed for
-	SchemaEditable bool
 	// InstanceTTL options
 	InstanceTTL int64
 }
 
-func newMetadataManager(SchemaEditable bool, InstanceTTL int64) datasource.MetadataManager {
-	return &MetadataManager{
-		SchemaEditable: SchemaEditable,
-		InstanceTTL:    InstanceTTL,
-	}
-}
-
-// RegisterService() implement:
+// RegisterService implement:
 // 1. capsule request to etcd kv format
 // 2. invoke etcd client to store data
 // 3. check etcd-client response && construct createServiceResponse
@@ -68,7 +62,7 @@ func (ds *MetadataManager) RegisterService(ctx context.Context, request *pb.Crea
 	remoteIP := util.GetIPFromContext(ctx)
 	service := request.Service
 	serviceFlag := util.StringJoin([]string{
-		service.Environment, service.AppId, service.ServiceName, service.Version}, "/")
+		service.Environment, service.AppId, service.ServiceName, service.Version}, path.SPLIT)
 	domainProject := util.ParseDomainProject(ctx)
 
 	serviceKey := &pb.MicroServiceKey{
@@ -88,328 +82,143 @@ func (ds *MetadataManager) RegisterService(ctx context.Context, request *pb.Crea
 		ctx = util.SetContext(ctx, uuid.ContextKey, index)
 		service.ServiceId = uuid.Generator().GetServiceID(ctx)
 	}
-	service.Timestamp = strconv.FormatInt(time.Now().Unix(), 10)
-	service.ModTimestamp = service.Timestamp
 
 	data, err := json.Marshal(service)
 	if err != nil {
 		log.Error(fmt.Sprintf("create micro-service[%s] failed, json marshal service failed, operator: %s",
 			serviceFlag, remoteIP), err)
-		return &pb.CreateServiceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	key := path.GenerateServiceKey(domainProject, service.ServiceId)
-	keyBytes := util.StringToBytesWithNoCopy(key)
-	indexBytes := util.StringToBytesWithNoCopy(index)
-	aliasBytes := util.StringToBytesWithNoCopy(path.GenerateServiceAliasKey(serviceKey))
+	alias := path.GenerateServiceAliasKey(serviceKey)
 
-	opts := []client.PluginOp{
-		client.OpPut(client.WithKey(keyBytes), client.WithValue(data)),
-		client.OpPut(client.WithKey(indexBytes), client.WithStrValue(service.ServiceId)),
+	opts := []etcdadpt.OpOptions{
+		etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(data)),
+		etcdadpt.OpPut(etcdadpt.WithStrKey(index), etcdadpt.WithStrValue(service.ServiceId)),
 	}
-	uniqueCmpOpts := []client.CompareOp{
-		client.OpCmp(client.CmpVer(indexBytes), client.CmpEqual, 0),
-		client.OpCmp(client.CmpVer(keyBytes), client.CmpEqual, 0),
+	uniqueCmpOpts := []etcdadpt.CmpOptions{
+		etcdadpt.NotExistKey(key),
+		etcdadpt.NotExistKey(index),
 	}
-	failOpts := []client.PluginOp{
-		client.OpGet(client.WithKey(indexBytes)),
+	failOpts := []etcdadpt.OpOptions{
+		etcdadpt.OpGet(etcdadpt.WithStrKey(index)),
 	}
 
 	if len(serviceKey.Alias) > 0 {
-		opts = append(opts, client.OpPut(client.WithKey(aliasBytes), client.WithStrValue(service.ServiceId)))
-		uniqueCmpOpts = append(uniqueCmpOpts,
-			client.OpCmp(client.CmpVer(aliasBytes), client.CmpEqual, 0))
-		failOpts = append(failOpts, client.OpGet(client.WithKey(aliasBytes)))
+		opts = append(opts, etcdadpt.OpPut(etcdadpt.WithStrKey(alias), etcdadpt.WithStrValue(service.ServiceId)))
+		uniqueCmpOpts = append(uniqueCmpOpts, etcdadpt.NotExistKey(alias))
+		failOpts = append(failOpts, etcdadpt.OpGet(etcdadpt.WithStrKey(alias)))
 	}
 
-	resp, err := client.Instance().TxnWithCmp(ctx, opts, uniqueCmpOpts, failOpts)
+	syncOpts, err := esync.GenCreateOpts(ctx, datasource.ResourceService, request)
+	if err != nil {
+		log.Error("fail to create sync opts", err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
+	}
+	opts = append(opts, syncOpts...)
+
+	resp, err := etcdadpt.TxnWithCmp(ctx, opts, uniqueCmpOpts, failOpts)
 	if err != nil {
 		log.Error(fmt.Sprintf("create micro-service[%s] failed, operator: %s",
 			serviceFlag, remoteIP), err)
-		return &pb.CreateServiceResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
-	if !resp.Succeeded {
-		if len(requestServiceID) != 0 {
-			if len(resp.Kvs) == 0 ||
-				requestServiceID != util.BytesToStringWithNoCopy(resp.Kvs[0].Value) {
-				log.Warn(fmt.Sprintf("create micro-service[%s] failed, service already exists, operator: %s",
-					serviceFlag, remoteIP))
-				return &pb.CreateServiceResponse{
-					Response: pb.CreateResponse(pb.ErrServiceAlreadyExists,
-						"ServiceID conflict or found the same service with different id."),
-				}, nil
-			}
-		}
 
-		if len(resp.Kvs) == 0 {
-			// internal error?
-			log.Error(fmt.Sprintf("create micro-service[%s] failed, unexpected txn response, operator: %s",
-				serviceFlag, remoteIP), nil)
-			return &pb.CreateServiceResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, "Unexpected txn response."),
-			}, nil
-		}
-
-		serviceIDInner := util.BytesToStringWithNoCopy(resp.Kvs[0].Value)
-		log.Warn(fmt.Sprintf("create micro-service[%s][%s] failed, service already exists, operator: %s",
-			serviceIDInner, serviceFlag, remoteIP))
+	if resp.Succeeded {
+		log.Info(fmt.Sprintf("create micro-service[%s][%s] successfully, operator: %s",
+			service.ServiceId, serviceFlag, remoteIP))
 		return &pb.CreateServiceResponse{
-			Response:  pb.CreateResponse(pb.ResponseSuccess, "register service successfully"),
-			ServiceId: serviceIDInner,
+			ServiceId: service.ServiceId,
 		}, nil
 	}
 
-	//TODO increase usage in quota system
+	if len(requestServiceID) != 0 {
+		if len(resp.Kvs) == 0 || requestServiceID != util.BytesToStringWithNoCopy(resp.Kvs[0].Value) {
+			log.Warn(fmt.Sprintf("create micro-service[%s] failed, service already exists, operator: %s",
+				serviceFlag, remoteIP))
+			return nil, pb.NewError(pb.ErrServiceAlreadyExists,
+				"ServiceID conflict or found the same service with different id.")
+		}
+	}
 
-	log.Info(fmt.Sprintf("create micro-service[%s][%s] successfully, operator: %s",
-		service.ServiceId, serviceFlag, remoteIP))
+	if len(resp.Kvs) == 0 {
+		// internal error?
+		log.Error(fmt.Sprintf("create micro-service[%s] failed, unexpected txn response, operator: %s",
+			serviceFlag, remoteIP), nil)
+		return nil, pb.NewError(pb.ErrInternal, "Unexpected txn response.")
+	}
+
+	existServiceID := util.BytesToStringWithNoCopy(resp.Kvs[0].Value)
+	log.Warn(fmt.Sprintf("create micro-service[%s][%s] failed, service already exists, operator: %s",
+		existServiceID, serviceFlag, remoteIP))
 	return &pb.CreateServiceResponse{
-		Response:  pb.CreateResponse(pb.ResponseSuccess, "Register service successfully."),
-		ServiceId: service.ServiceId,
+		ServiceId: existServiceID,
 	}, nil
-
 }
 
-func (ds *MetadataManager) GetServices(ctx context.Context, request *pb.GetServicesRequest) (
+func (ds *MetadataManager) ListService(ctx context.Context, request *pb.GetServicesRequest) (
 	*pb.GetServicesResponse, error) {
-	services, err := serviceUtil.GetAllServiceUtil(ctx)
+	services, err := eutil.GetAllServiceUtil(ctx)
 	if err != nil {
 		log.Error("get all services by domain failed", err)
-		return &pb.GetServicesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	return &pb.GetServicesResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get all services successfully."),
 		Services: services,
 	}, nil
 }
 
 func (ds *MetadataManager) GetService(ctx context.Context, request *pb.GetServiceRequest) (
-	*pb.GetServiceResponse, error) {
+	*pb.MicroService, error) {
 	domainProject := util.ParseDomainProject(ctx)
-	singleService, err := serviceUtil.GetService(ctx, domainProject, request.ServiceId)
+	singleService, err := eutil.GetService(ctx, domainProject, request.ServiceId)
 
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("get micro-service[%s] failed, service does not exist in db", request.ServiceId))
-			return &pb.GetServiceResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-			}, nil
+			return nil, pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 		}
 		log.Error(fmt.Sprintf("get micro-service[%s] failed, get service file failed", request.ServiceId), err)
-		return &pb.GetServiceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
-	return &pb.GetServiceResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get service successfully."),
-		Service:  singleService,
-	}, nil
+	return singleService, nil
 }
 
-func (ds *MetadataManager) GetServiceDetail(ctx context.Context, request *pb.GetServiceRequest) (
-	*pb.GetServiceDetailResponse, error) {
-	domainProject := util.ParseDomainProject(ctx)
-
-	service, err := serviceUtil.GetService(ctx, domainProject, request.ServiceId)
-	if err != nil {
-		if errors.Is(err, datasource.ErrNoData) {
-			return &pb.GetServiceDetailResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-			}, nil
-		}
-		return &pb.GetServiceDetailResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-
-	key := &pb.MicroServiceKey{
-		Tenant:      domainProject,
-		Environment: service.Environment,
-		AppId:       service.AppId,
-		ServiceName: service.ServiceName,
-		Version:     "",
-	}
-	versions, err := getServiceAllVersions(ctx, key)
-	if err != nil {
-		log.Error(fmt.Sprintf("get service[%s/%s/%s] all versions failed",
-			service.Environment, service.AppId, service.ServiceName), err)
-		return &pb.GetServiceDetailResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-
-	options := []string{"tags", "rules", "instances", "schemas", "dependencies"}
-	serviceInfo, err := getServiceDetailUtil(ctx, ServiceDetailOpt{
-		domainProject: domainProject,
-		service:       service,
-		options:       options,
-	})
-	if err != nil {
-		return &pb.GetServiceDetailResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-
-	serviceInfo.MicroService = service
-	serviceInfo.MicroServiceVersions = versions
-	return &pb.GetServiceDetailResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get service successfully."),
-		Service:  serviceInfo,
-	}, nil
-}
-
-func (ds *MetadataManager) GetServicesInfo(ctx context.Context, request *pb.GetServicesInfoRequest) (
-	*pb.GetServicesInfoResponse, error) {
+func (ds *MetadataManager) GetOverview(ctx context.Context, request *pb.GetServicesRequest) (
+	*pb.Statistics, error) {
 	ctx = util.WithCacheOnly(ctx)
-
-	optionMap := make(map[string]struct{}, len(request.Options))
-	for _, opt := range request.Options {
-		optionMap[opt] = struct{}{}
-	}
-
-	options := make([]string, 0, len(optionMap))
-	if _, ok := optionMap["all"]; ok {
-		optionMap["statistics"] = struct{}{}
-		options = []string{"tags", "rules", "instances", "schemas", "dependencies"}
-	} else {
-		for opt := range optionMap {
-			options = append(options, opt)
-		}
-	}
-
-	var st *pb.Statistics
-	if _, ok := optionMap["statistics"]; ok {
-		var err error
-		st, err = statistics(ctx, request.WithShared)
-		if err != nil {
-			return &pb.GetServicesInfoResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
-		}
-		if len(optionMap) == 1 {
-			return &pb.GetServicesInfoResponse{
-				Response:   pb.CreateResponse(pb.ResponseSuccess, "Statistics successfully."),
-				Statistics: st,
-			}, nil
-		}
-	}
-
-	//获取所有服务
-	services, err := serviceUtil.GetAllServiceUtil(ctx)
+	st, err := statistics(ctx, false)
 	if err != nil {
-		log.Error("get all services by domain failed", err)
-		return &pb.GetServicesInfoResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
-
-	allServiceDetails := make([]*pb.ServiceDetail, 0, len(services))
-	domainProject := util.ParseDomainProject(ctx)
-	for _, service := range services {
-		if !ds.filterServices(domainProject, request, service) {
-			continue
-		}
-
-		serviceDetail, err := getServiceDetailUtil(ctx, ServiceDetailOpt{
-			domainProject: domainProject,
-			service:       service,
-			countOnly:     request.CountOnly,
-			options:       options,
-		})
-		if err != nil {
-			return &pb.GetServicesInfoResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
-		}
-		serviceDetail.MicroService = service
-		tmpServiceDetail := &pb.ServiceDetail{}
-		err = copier.CopyWithOption(tmpServiceDetail, serviceDetail, copier.Option{DeepCopy: true})
-		if err != nil {
-			return &pb.GetServicesInfoResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
-		}
-		tmpServiceDetail.MicroService.Properties = nil
-		tmpServiceDetail.MicroService.Schemas = nil
-		instances := tmpServiceDetail.Instances
-		for _, instance := range instances {
-			instance.Properties = nil
-		}
-		allServiceDetails = append(allServiceDetails, tmpServiceDetail)
-	}
-
-	return &pb.GetServicesInfoResponse{
-		Response:          pb.CreateResponse(pb.ResponseSuccess, "Get services info successfully."),
-		AllServicesDetail: allServiceDetails,
-		Statistics:        st,
-	}, nil
+	return st, nil
 }
 
-func (ds *MetadataManager) filterServices(domainProject string, request *pb.GetServicesInfoRequest, service *pb.MicroService) bool {
-	if !request.WithShared && core.IsGlobal(pb.MicroServiceToKey(domainProject, service)) {
-		return false
-	}
-	if len(request.Environment) > 0 && request.Environment != service.Environment {
-		return false
-	}
-	if len(request.AppId) > 0 && request.AppId != service.AppId {
-		return false
-	}
-	if len(request.ServiceName) > 0 && request.ServiceName != service.ServiceName {
-		return false
-	}
-	return true
-}
-
-func (ds *MetadataManager) GetServicesStatistics(ctx context.Context, request *pb.GetServicesRequest) (
-	*pb.GetServicesInfoStatisticsResponse, error) {
-	ctx = util.WithCacheOnly(ctx)
-	var st *pb.Statistics
-	var err error
-	st, err = statistics(ctx, false)
-	if err != nil {
-		return &pb.GetServicesInfoStatisticsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-	return &pb.GetServicesInfoStatisticsResponse{
-		Response:   pb.CreateResponse(pb.ResponseSuccess, "Get services statistics successfully."),
-		Statistics: st,
-	}, nil
-}
-
-func (ds *MetadataManager) GetApplications(ctx context.Context, request *pb.GetAppsRequest) (*pb.GetAppsResponse, error) {
+func (ds *MetadataManager) ListApp(ctx context.Context, request *pb.GetAppsRequest) (*pb.GetAppsResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 	key := path.GetServiceAppKey(domainProject, request.Environment, "")
 
-	opts := append(serviceUtil.FromContext(ctx),
-		registry.WithStrKey(key),
-		registry.WithPrefix(),
-		registry.WithKeyOnly())
+	opts := append(eutil.FromContext(ctx),
+		etcdadpt.WithStrKey(key),
+		etcdadpt.WithPrefix(),
+		etcdadpt.WithKeyOnly())
 
-	resp, err := kv.Store().ServiceIndex().Search(ctx, opts...)
+	resp, err := sd.ServiceIndex().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
 	l := len(resp.Kvs)
 	if l == 0 {
-		return &pb.GetAppsResponse{
-			Response: pb.CreateResponse(pb.ResponseSuccess, "Get all applications successfully."),
-		}, nil
+		return &pb.GetAppsResponse{}, nil
 	}
 
 	apps := make([]string, 0, l)
 	appMap := make(map[string]struct{}, l)
 	for _, keyValue := range resp.Kvs {
 		key := path.GetInfoFromSvcIndexKV(keyValue.Key)
-		if !request.WithShared && core.IsGlobal(key) {
+		if !request.WithShared && datasource.IsGlobal(key) {
 			continue
 		}
 		if _, ok := appMap[key.AppId]; ok {
@@ -420,77 +229,83 @@ func (ds *MetadataManager) GetApplications(ctx context.Context, request *pb.GetA
 	}
 
 	return &pb.GetAppsResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get all applications successfully."),
-		AppIds:   apps,
+		AppIds: apps,
 	}, nil
 }
 
 func (ds *MetadataManager) ExistServiceByID(ctx context.Context, request *pb.GetExistenceByIDRequest) (*pb.GetExistenceByIDResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 	return &pb.GetExistenceByIDResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get all applications successfully."),
-		Exist:    serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId),
+		Exist: eutil.ServiceExist(ctx, domainProject, request.ServiceId),
 	}, nil
 }
 
-func (ds *MetadataManager) ExistService(ctx context.Context, request *pb.GetExistenceRequest) (*pb.GetExistenceResponse,
-	error) {
+func (ds *MetadataManager) ExistService(ctx context.Context, request *pb.GetExistenceRequest) (string, error) {
 	domainProject := util.ParseDomainProject(ctx)
 	serviceFlag := util.StringJoin([]string{
-		request.Environment, request.AppId, request.ServiceName, request.Version}, "/")
+		request.Environment, request.AppId, request.ServiceName, request.Version}, path.SPLIT)
 
-	ids, exist, err := serviceUtil.FindServiceIds(ctx, request.Version, &pb.MicroServiceKey{
+	ids, exist, err := eutil.FindServiceIds(ctx, &pb.MicroServiceKey{
 		Environment: request.Environment,
 		AppId:       request.AppId,
 		ServiceName: request.ServiceName,
 		Alias:       request.ServiceName,
 		Version:     request.Version,
 		Tenant:      domainProject,
-	})
+	}, true)
 	if err != nil {
 		log.Error(fmt.Sprintf("micro-service[%s] exist failed, find serviceIDs failed", serviceFlag), err)
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return "", pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if !exist {
 		log.Info(fmt.Sprintf("micro-service[%s] exist failed, service does not exist", serviceFlag))
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, serviceFlag+" does not exist."),
-		}, nil
+		return "", pb.NewError(pb.ErrServiceNotExists, serviceFlag+" does not exist.")
 	}
 	if len(ids) == 0 {
 		log.Info(fmt.Sprintf("micro-service[%s] exist failed, version mismatch", serviceFlag))
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrServiceVersionNotExists, serviceFlag+" version mismatch."),
-		}, nil
+		return "", pb.NewError(pb.ErrServiceVersionNotExists, serviceFlag+" version mismatch.")
 	}
-	return &pb.GetExistenceResponse{
-		Response:  pb.CreateResponse(pb.ResponseSuccess, "get service id successfully."),
-		ServiceId: ids[0], // 约定多个时，取较新版本
-	}, nil
+	// 约定多个时，取较新版本
+	return ids[0], nil
 }
 
-func (ds *MetadataManager) UpdateService(ctx context.Context, request *pb.UpdateServicePropsRequest) (
-	*pb.UpdateServicePropsResponse, error) {
+func (ds *MetadataManager) FindService(ctx context.Context, request *pb.MicroServiceKey) (*pb.GetServicesResponse, error) {
+	copyKey := *request
+	copyKey.Tenant = util.ParseDomainProject(ctx)
+	copyKey.Version = ""
+	key := path.GenerateServiceIndexKey(&copyKey)
+	opts := append(eutil.FromContext(ctx), etcdadpt.WithStrKey(key), etcdadpt.WithPrefix())
+
+	resp, err := sd.ServiceIndex().Search(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	result := &pb.GetServicesResponse{}
+	for _, kv := range resp.Kvs {
+		svc, err := ds.GetService(ctx, &pb.GetServiceRequest{ServiceId: kv.Value.(string)})
+		if err != nil {
+			return nil, err
+		}
+		result.Services = append(result.Services, svc)
+	}
+	return result, nil
+}
+
+func (ds *MetadataManager) PutServiceProperties(ctx context.Context, request *pb.UpdateServicePropsRequest) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 
 	key := path.GenerateServiceKey(domainProject, request.ServiceId)
-	microservice, err := serviceUtil.GetService(ctx, domainProject, request.ServiceId)
+	microservice, err := eutil.GetService(ctx, domainProject, request.ServiceId)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("service does not exist, update service[%s] properties failed, operator: %s",
 				request.ServiceId, remoteIP))
-			return &pb.UpdateServicePropsResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-			}, nil
+			return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 		}
 		log.Error(fmt.Sprintf("update service[%s] properties failed, get service file failed, operator: %s",
 			request.ServiceId, remoteIP), err)
-		return &pb.UpdateServicePropsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	copyServiceRef := *microservice
@@ -499,116 +314,66 @@ func (ds *MetadataManager) UpdateService(ctx context.Context, request *pb.Update
 
 	data, err := json.Marshal(copyServiceRef)
 	if err != nil {
-		log.Errorf(err, "update service[%s] properties failed, json marshal service failed, operator: %s",
-			request.ServiceId, remoteIP)
-		return &pb.UpdateServicePropsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("update service[%s] properties failed, json marshal service failed, operator: %s",
+			request.ServiceId, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
+
+	opts := []etcdadpt.OpOptions{
+		etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(data)),
+	}
+	syncOpts, err := esync.GenUpdateOpts(ctx, datasource.ResourceService, request)
+	if err != nil {
+		log.Error("fail to create task", err)
+		return pb.NewError(pb.ErrInternal, err.Error())
+	}
+	opts = append(opts, syncOpts...)
 
 	// Set key file
-	resp, err := client.Instance().TxnWithCmp(ctx,
-		[]client.PluginOp{client.OpPut(client.WithStrKey(key), client.WithValue(data))},
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(key)),
-			client.CmpNotEqual, 0)},
-		nil)
+	resp, err := etcdadpt.TxnWithCmp(ctx, opts, etcdadpt.If(etcdadpt.NotEqualVer(key, 0)), nil)
 	if err != nil {
-		log.Errorf(err, "update service[%s] properties failed, operator: %s", request.ServiceId, remoteIP)
-		return &pb.UpdateServicePropsResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("update service[%s] properties failed, operator: %s", request.ServiceId, remoteIP), err)
+		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 	if !resp.Succeeded {
-		log.Errorf(err, "update service[%s] properties failed, service does not exist, operator: %s",
-			request.ServiceId, remoteIP)
-		return &pb.UpdateServicePropsResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+		log.Error(fmt.Sprintf("update service[%s] properties failed, service does not exist, operator: %s",
+			request.ServiceId, remoteIP), err)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	log.Infof("update service[%s] properties successfully, operator: %s", request.ServiceId, remoteIP)
-	return &pb.UpdateServicePropsResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "update service successfully."),
-	}, nil
-}
-
-func (ds *MetadataManager) UnregisterService(ctx context.Context, request *pb.DeleteServiceRequest) (
-	*pb.DeleteServiceResponse, error) {
-	resp, err := ds.DeleteServicePri(ctx, request.ServiceId, request.Force)
-	return &pb.DeleteServiceResponse{
-		Response: resp,
-	}, err
-}
-
-func (ds *MetadataManager) GetServiceCountByDomainProject(ctx context.Context, request *pb.GetServiceCountRequest) (*pb.GetServiceCountResponse, error) {
-	domainProject := request.Domain
-	if request.Project != "" {
-		domainProject += path.SPLIT + request.Project
-	}
-	count, err := serviceUtil.GetOneDomainProjectServiceCount(ctx, domainProject)
-	if err != nil {
-		return nil, err
-	}
-	return &pb.GetServiceCountResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get service count by domain project successfully"),
-		Count:    count,
-	}, nil
+	log.Info(fmt.Sprintf("update service[%s] properties successfully, operator: %s", request.ServiceId, remoteIP))
+	return nil
 }
 
 func (ds *MetadataManager) RegisterInstance(ctx context.Context, request *pb.RegisterInstanceRequest) (
 	*pb.RegisterInstanceResponse, error) {
+	instanceID, err := ds.registerInstance(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.RegisterInstanceResponse{
+		InstanceId: instanceID,
+	}, nil
+}
+
+func (ds *MetadataManager) registerInstance(ctx context.Context, request *pb.RegisterInstanceRequest) (string, error) {
 	remoteIP := util.GetIPFromContext(ctx)
 	instance := request.Instance
 
 	//允许自定义id
 	if len(instance.InstanceId) > 0 {
-		// keep alive the lease ttl
-		// there are two reasons for sending a heartbeat here:
-		// 1. request the scenario the instance has been removed,
-		//    the cast of registration operation can be reduced.
-		// 2. request the self-protection scenario, the instance is unhealthy
-		//    and needs to be re-registered.
-		resp, err := ds.Heartbeat(ctx, &pb.HeartbeatRequest{ServiceId: instance.ServiceId,
-			InstanceId: instance.InstanceId})
-		if resp == nil {
-			log.Errorf(err, "register service[%s]'s instance failed, endpoints %v, host '%s', operator %s",
-				instance.ServiceId, instance.Endpoints, instance.HostName, remoteIP)
-			return &pb.RegisterInstanceResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, nil
+		needRegister, err := ds.sendHeartbeatInstead(ctx, instance)
+		if err != nil {
+			return "", err
 		}
-		switch resp.Response.GetCode() {
-		case pb.ResponseSuccess:
-			log.Info(fmt.Sprintf("register instance successful, reuse instance[%s/%s], operator %s",
-				instance.ServiceId, instance.InstanceId, remoteIP))
-			return &pb.RegisterInstanceResponse{
-				Response:   resp.Response,
-				InstanceId: instance.InstanceId,
-			}, nil
-		case pb.ErrInstanceNotExists:
-			// register a new one
-		default:
-			log.Error(fmt.Sprintf("register instance failed, reuse instance[%s/%s], operator %s",
-				instance.ServiceId, instance.InstanceId, remoteIP), err)
-			return &pb.RegisterInstanceResponse{
-				Response: resp.Response,
-			}, err
+		if !needRegister {
+			return instance.InstanceId, nil
 		}
+	} else {
+		instance.InstanceId = uuid.Generator().GetInstanceID(ctx)
 	}
 
-	if err := preProcessRegisterInstance(ctx, instance); err != nil {
-		log.Error(fmt.Sprintf("register service[%s]'s instance failed, endpoints %v, host '%s', operator %s",
-			instance.ServiceId, instance.Endpoints, instance.HostName, remoteIP), err)
-		return &pb.RegisterInstanceResponse{
-			Response: pb.CreateResponseWithSCErr(err),
-		}, nil
-	}
-
-	ttl := int64(instance.HealthCheck.Interval * (instance.HealthCheck.Times + 1))
-	if ds.InstanceTTL > 0 {
-		ttl = ds.InstanceTTL
-	}
+	ttl := ds.calcInstanceTTL(instance)
 	instanceFlag := fmt.Sprintf("ttl %ds, endpoints %v, host '%s', serviceID %s",
 		ttl, instance.Endpoints, instance.HostName, instance.ServiceId)
 
@@ -620,72 +385,99 @@ func (ds *MetadataManager) RegisterInstance(ctx context.Context, request *pb.Reg
 	if err != nil {
 		log.Error(fmt.Sprintf("register instance failed, %s, instanceID %s, operator %s",
 			instanceFlag, instanceID, remoteIP), err)
-		return &pb.RegisterInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return "", pb.NewError(pb.ErrInternal, err.Error())
 	}
 
-	leaseID, err := client.Instance().LeaseGrant(ctx, ttl)
+	leaseID, err := etcdadpt.Instance().LeaseGrant(ctx, ttl)
 	if err != nil {
 		log.Error(fmt.Sprintf("grant lease failed, %s, operator: %s", instanceFlag, remoteIP), err)
-		return &pb.RegisterInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
+		return "", pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 
 	// build the request options
 	key := path.GenerateInstanceKey(domainProject, instance.ServiceId, instanceID)
 	hbKey := path.GenerateInstanceLeaseKey(domainProject, instance.ServiceId, instanceID)
 
-	opts := []client.PluginOp{
-		client.OpPut(client.WithStrKey(key), client.WithValue(data),
-			client.WithLease(leaseID)),
-		client.OpPut(client.WithStrKey(hbKey), client.WithStrValue(fmt.Sprintf("%d", leaseID)),
-			client.WithLease(leaseID)),
-	}
-
-	resp, err := client.Instance().TxnWithCmp(ctx, opts,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, instance.ServiceId))),
-			client.CmpNotEqual, 0)},
+	leaseOp := etcdadpt.WithLease(leaseID)
+	resp, err := etcdadpt.TxnWithCmp(ctx,
+		etcdadpt.Ops(
+			etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(data), leaseOp),
+			etcdadpt.OpPut(etcdadpt.WithStrKey(hbKey), etcdadpt.WithStrValue(fmt.Sprintf("%d", leaseID)), leaseOp),
+		),
+		etcdadpt.If(etcdadpt.NotEqualVer(path.GenerateServiceKey(domainProject, instance.ServiceId), 0)),
 		nil)
 	if err != nil {
 		log.Error(fmt.Sprintf("register instance failed, %s, instanceID %s, operator %s",
 			instanceFlag, instanceID, remoteIP), err)
-		return &pb.RegisterInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
+		return "", pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 	if !resp.Succeeded {
 		log.Error(fmt.Sprintf("register instance failed, %s, instanceID %s, operator %s: service does not exist",
 			instanceFlag, instanceID, remoteIP), nil)
-		return &pb.RegisterInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+		return "", pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
-
-	//TODO increase usage in quota system
-
+	sendEvent(ctx, sync.CreateAction, datasource.ResourceInstance, request)
 	log.Info(fmt.Sprintf("register instance %s, instanceID %s, operator %s",
 		instanceFlag, instanceID, remoteIP))
-	return &pb.RegisterInstanceResponse{
-		Response:   pb.CreateResponse(pb.ResponseSuccess, "Register service instance successfully."),
-		InstanceId: instanceID,
-	}, nil
+	return instanceID, nil
 }
 
-func (ds *MetadataManager) ExistInstanceByID(ctx context.Context, request *pb.MicroServiceInstanceKey) (*pb.GetExistenceByIDResponse, error) {
+func sendEvent(ctx context.Context, action string, resourceType string, resource interface{}) {
+	if !util.EnableSync(ctx) {
+		return
+	}
+	event.Publish(ctx, action, resourceType, resource)
+}
+
+func (ds *MetadataManager) calcInstanceTTL(instance *pb.MicroServiceInstance) int64 {
+	if instance.HealthCheck == nil {
+		instance.HealthCheck = &pb.HealthCheck{
+			Mode:     pb.CHECK_BY_HEARTBEAT,
+			Interval: datasource.DefaultLeaseRenewalInterval,
+			Times:    datasource.DefaultLeaseRetryTimes,
+		}
+	}
+	ttl := int64(instance.HealthCheck.Interval * (instance.HealthCheck.Times + 1))
+	if ds.InstanceTTL > 0 {
+		ttl = ds.InstanceTTL
+	}
+	return ttl
+}
+
+func (ds *MetadataManager) sendHeartbeatInstead(ctx context.Context, instance *pb.MicroServiceInstance) (bool, error) {
+	remoteIP := util.GetIPFromContext(ctx)
+	// keep alive the lease ttl
+	// there are two reasons for sending a heartbeat here:
+	// 1. request the scenario the instance has been removed,
+	//    the cast of registration operation can be reduced.
+	// 2. request the self-protection scenario, the instance is unhealthy
+	//    and needs to be re-registered.
+	err := ds.SendHeartbeat(ctx, &pb.HeartbeatRequest{ServiceId: instance.ServiceId,
+		InstanceId: instance.InstanceId})
+	if err == nil {
+		log.Info(fmt.Sprintf("register instance successful, reuse instance[%s/%s], operator %s",
+			instance.ServiceId, instance.InstanceId, remoteIP))
+		return false, nil
+	}
+
+	if errsvc.IsErrEqualCode(err, pb.ErrInstanceNotExists) {
+		// register a new one
+		return true, nil
+	}
+
+	log.Error(fmt.Sprintf("register service[%s]'s instance failed, endpoints %v, host '%s', operator %s",
+		instance.ServiceId, instance.Endpoints, instance.HostName, remoteIP), err)
+	return false, err
+}
+
+func (ds *MetadataManager) ExistInstance(ctx context.Context, request *pb.MicroServiceInstanceKey) (*pb.GetExistenceByIDResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
-	exist, _ := serviceUtil.InstanceExist(ctx, domainProject, request.ServiceId, request.InstanceId)
-	if !exist {
-		return &pb.GetExistenceByIDResponse{
-			Response: pb.CreateResponse(pb.ErrInstanceNotExists, "Check instance exist failed."),
-			Exist:    false,
-		}, datasource.ErrInstanceNotExists
+	exist, err := eutil.ExistInstance(ctx, domainProject, request.ServiceId, request.InstanceId)
+	if err != nil {
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	return &pb.GetExistenceByIDResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Check service exists successfully."),
-		Exist:    exist,
+		Exist: exist,
 	}, nil
 }
 
@@ -696,39 +488,31 @@ func (ds *MetadataManager) GetInstance(ctx context.Context, request *pb.GetOneIn
 	service := &pb.MicroService{}
 	var err error
 	if len(request.ConsumerServiceId) > 0 {
-		service, err = serviceUtil.GetService(ctx, domainProject, request.ConsumerServiceId)
+		service, err = eutil.GetService(ctx, domainProject, request.ConsumerServiceId)
 		if err != nil {
 			if errors.Is(err, datasource.ErrNoData) {
 				log.Debug(fmt.Sprintf("consumer does not exist in db, consumer[%s] find provider instance[%s/%s]",
 					request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId))
-				return &pb.GetOneInstanceResponse{
-					Response: pb.CreateResponse(pb.ErrServiceNotExists,
-						fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
-				}, nil
+				return nil, pb.NewError(pb.ErrServiceNotExists,
+					fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId))
 			}
 			log.Error(fmt.Sprintf("get consumer failed, consumer[%s] find provider instance[%s/%s]",
 				request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId), err)
-			return &pb.GetOneInstanceResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
+			return nil, pb.NewError(pb.ErrInternal, err.Error())
 		}
 	}
 
-	provider, err := serviceUtil.GetService(ctx, domainProject, request.ProviderServiceId)
+	provider, err := eutil.GetService(ctx, domainProject, request.ProviderServiceId)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("provider does not exist in db, consumer[%s] find provider instance[%s/%s]",
 				request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId))
-			return &pb.GetOneInstanceResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists,
-					fmt.Sprintf("Provider[%s] does not exist.", request.ProviderServiceId)),
-			}, nil
+			return nil, pb.NewError(pb.ErrServiceNotExists,
+				fmt.Sprintf("Provider[%s] does not exist.", request.ProviderServiceId))
 		}
 		log.Error(fmt.Sprintf("get provider failed, consumer[%s] find provider instance[%s/%s]",
 			request.ConsumerServiceId, request.ProviderServiceId, request.ProviderInstanceId), err)
-		return &pb.GetOneInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	findFlag := func() string {
@@ -746,16 +530,12 @@ func (ds *MetadataManager) GetInstance(ctx context.Context, request *pb.GetOneIn
 		}, request.Tags, rev)
 	if err != nil {
 		log.Error(fmt.Sprintf("find Instances by providerID failed, %s failed", findFlag()), err)
-		return &pb.GetOneInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if item == nil || len(item.Instances) == 0 {
 		mes := fmt.Errorf("%s failed, provider instance does not exist", findFlag())
 		log.Error("find Instances by ProviderID failed", mes)
-		return &pb.GetOneInstanceResponse{
-			Response: pb.CreateResponse(pb.ErrInstanceNotExists, mes.Error()),
-		}, nil
+		return nil, pb.NewError(pb.ErrInstanceNotExists, mes.Error())
 	}
 
 	instance := item.Instances[0]
@@ -765,51 +545,42 @@ func (ds *MetadataManager) GetInstance(ctx context.Context, request *pb.GetOneIn
 	_ = util.WithResponseRev(ctx, item.Rev)
 
 	return &pb.GetOneInstanceResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get instance successfully."),
 		Instance: instance,
 	}, nil
 }
 
-func (ds *MetadataManager) GetInstances(ctx context.Context, request *pb.GetInstancesRequest) (*pb.GetInstancesResponse,
+func (ds *MetadataManager) ListInstance(ctx context.Context, request *pb.GetInstancesRequest) (*pb.GetInstancesResponse,
 	error) {
 	domainProject := util.ParseDomainProject(ctx)
 
 	service := &pb.MicroService{}
 	var err error
 	if len(request.ConsumerServiceId) > 0 {
-		service, err = serviceUtil.GetService(ctx, domainProject, request.ConsumerServiceId)
+		service, err = eutil.GetService(ctx, domainProject, request.ConsumerServiceId)
 		if err != nil {
 			if errors.Is(err, datasource.ErrNoData) {
 				log.Debug(fmt.Sprintf("consumer does not exist in db, consumer[%s] find provider[%s] instances",
 					request.ConsumerServiceId, request.ProviderServiceId))
-				return &pb.GetInstancesResponse{
-					Response: pb.CreateResponse(pb.ErrServiceNotExists,
-						fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
-				}, nil
+				return nil, pb.NewError(pb.ErrServiceNotExists,
+					fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId))
 			}
 			log.Error(fmt.Sprintf("get consumer failed, consumer[%s] find provider[%s] instances",
 				request.ConsumerServiceId, request.ProviderServiceId), err)
-			return &pb.GetInstancesResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
+			return nil, pb.NewError(pb.ErrInternal, err.Error())
 		}
 	}
 
-	provider, err := serviceUtil.GetService(ctx, domainProject, request.ProviderServiceId)
+	provider, err := eutil.GetService(ctx, domainProject, request.ProviderServiceId)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("provider does not exist, consumer[%s] find provider[%s] instances",
 				request.ConsumerServiceId, request.ProviderServiceId))
-			return &pb.GetInstancesResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists,
-					fmt.Sprintf("Provider[%s] does not exist.", request.ProviderServiceId)),
-			}, nil
+			return nil, pb.NewError(pb.ErrServiceNotExists,
+				fmt.Sprintf("Provider[%s] does not exist.", request.ProviderServiceId))
 		}
 		log.Error(fmt.Sprintf("get provider failed, consumer[%s] find provider[%s] instances",
 			request.ConsumerServiceId, request.ProviderServiceId), err)
-		return &pb.GetInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	findFlag := func() string {
@@ -825,17 +596,13 @@ func (ds *MetadataManager) GetInstances(ctx context.Context, request *pb.GetInst
 			ServiceId: request.ProviderServiceId,
 		}, request.Tags, rev)
 	if err != nil {
-		log.Errorf(err, "FindInstances.GetWithProviderID failed, %s failed", findFlag())
-		return &pb.GetInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("FindInstances.GetWithProviderID failed, %s failed", findFlag()), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if item == nil || len(item.ServiceIds) == 0 {
-		mes := fmt.Errorf("%s failed, provider instance does not exist", findFlag())
-		log.Errorf(mes, "FindInstances.GetWithProviderID failed")
-		return &pb.GetInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, mes.Error()),
-		}, nil
+		err := fmt.Errorf("%s failed, provider instance does not exist", findFlag())
+		log.Error("FindInstances.GetWithProviderID failed", err)
+		return nil, pb.NewError(pb.ErrServiceNotExists, err.Error())
 	}
 
 	instances := item.Instances
@@ -845,66 +612,8 @@ func (ds *MetadataManager) GetInstances(ctx context.Context, request *pb.GetInst
 	_ = util.WithResponseRev(ctx, item.Rev)
 
 	return &pb.GetInstancesResponse{
-		Response:  pb.CreateResponse(pb.ResponseSuccess, "Query service instances successfully."),
 		Instances: instances,
 	}, nil
-}
-
-func (ds *MetadataManager) GetProviderInstances(ctx context.Context, request *pb.GetProviderInstancesRequest) (instances []*pb.MicroServiceInstance, rev string, err error) {
-	var (
-		maxRevs       = make([]int64, len(clustersIndex))
-		counts        = make([]int64, len(clustersIndex))
-		domainProject = util.ParseTargetDomainProject(ctx)
-	)
-	instances, err = ds.findInstances(ctx, domainProject, request.ProviderServiceId, maxRevs, counts)
-	if err != nil {
-		return
-	}
-	return instances, serviceUtil.FormatRevision(maxRevs, counts), nil
-}
-
-func (ds *MetadataManager) BatchGetProviderInstances(ctx context.Context, request *pb.BatchGetInstancesRequest) (instances []*pb.MicroServiceInstance, rev string, err error) {
-	var (
-		maxRevs       = make([]int64, len(clustersIndex))
-		counts        = make([]int64, len(clustersIndex))
-		domainProject = util.ParseTargetDomainProject(ctx)
-	)
-	if request == nil || len(request.ServiceIds) == 0 {
-		return nil, "", fmt.Errorf("invalid param BatchGetInstancesRequest")
-	}
-
-	for _, providerServiceID := range request.ServiceIds {
-		insts, err := ds.findInstances(ctx, domainProject, providerServiceID, maxRevs, counts)
-		if err != nil {
-			return nil, "", err
-		}
-		instances = append(instances, insts...)
-	}
-
-	return instances, serviceUtil.FormatRevision(maxRevs, counts), nil
-}
-
-func (ds *MetadataManager) findInstances(ctx context.Context, domainProject, serviceID string, maxRevs []int64, counts []int64) (instances []*pb.MicroServiceInstance, err error) {
-	key := path.GenerateInstanceKey(domainProject, serviceID, "")
-	opts := append(serviceUtil.FromContext(ctx), client.WithStrKey(key), client.WithPrefix())
-	resp, err := kv.Store().Instance().Search(ctx, opts...)
-	if err != nil {
-		return nil, err
-	}
-	if len(resp.Kvs) == 0 {
-		return
-	}
-
-	for _, kv := range resp.Kvs {
-		if i, ok := clustersIndex[kv.ClusterName]; ok {
-			if kv.ModRevision > maxRevs[i] {
-				maxRevs[i] = kv.ModRevision
-			}
-			counts[i]++
-		}
-		instances = append(instances, kv.Value.(*pb.MicroServiceInstance))
-	}
-	return
 }
 
 func (ds *MetadataManager) FindInstances(ctx context.Context, request *pb.FindInstancesRequest) (*pb.FindInstancesResponse,
@@ -915,19 +624,16 @@ func (ds *MetadataManager) FindInstances(ctx context.Context, request *pb.FindIn
 		AppId:       request.AppId,
 		ServiceName: request.ServiceName,
 		Alias:       request.Alias,
-		Version:     request.VersionRule,
 	}
 
 	rev, ok := ctx.Value(util.CtxRequestRevision).(string)
 	if !ok {
 		err := errors.New("rev request context is not type string")
 		log.Error("", err)
-		return &pb.FindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
-	if core.IsGlobal(provider) {
+	if datasource.IsGlobal(provider) {
 		return ds.findSharedServiceInstance(ctx, request, provider, rev)
 	}
 	return ds.findInstance(ctx, request, provider, rev)
@@ -939,21 +645,17 @@ func (ds *MetadataManager) findInstance(ctx context.Context, request *pb.FindIns
 	domainProject := util.ParseDomainProject(ctx)
 	service := &pb.MicroService{Environment: request.Environment}
 	if len(request.ConsumerServiceId) > 0 {
-		service, err = serviceUtil.GetService(ctx, domainProject, request.ConsumerServiceId)
+		service, err = eutil.GetService(ctx, domainProject, request.ConsumerServiceId)
 		if err != nil {
 			if errors.Is(err, datasource.ErrNoData) {
-				log.Debug(fmt.Sprintf("consumer does not exist, consumer[%s] find provider[%s/%s/%s/%s]",
-					request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName, request.VersionRule))
-				return &pb.FindInstancesResponse{
-					Response: pb.CreateResponse(pb.ErrServiceNotExists,
-						fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId)),
-				}, nil
+				log.Debug(fmt.Sprintf("consumer does not exist, consumer[%s] find provider[%s/%s/%s]",
+					request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName))
+				return nil, pb.NewError(pb.ErrServiceNotExists,
+					fmt.Sprintf("Consumer[%s] does not exist.", request.ConsumerServiceId))
 			}
-			log.Error(fmt.Sprintf("get consumer failed, consumer[%s] find provider[%s/%s/%s/%s]",
-				request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName, request.VersionRule), err)
-			return &pb.FindInstancesResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
+			log.Error(fmt.Sprintf("get consumer failed, consumer[%s] find provider[%s/%s/%s]",
+				request.ConsumerServiceId, request.Environment, request.AppId, request.ServiceName), err)
+			return nil, pb.NewError(pb.ErrInternal, err.Error())
 		}
 		provider.Environment = service.Environment
 	}
@@ -963,49 +665,41 @@ func (ds *MetadataManager) findInstance(ctx context.Context, request *pb.FindIns
 	ctx = util.SetTargetDomainProject(ctx, util.ParseDomain(ctx), util.ParseProject(ctx))
 	provider.Tenant = util.ParseTargetDomainProject(ctx)
 
-	findFlag := fmt.Sprintf("Consumer[%s][%s/%s/%s/%s] find provider[%s/%s/%s/%s]",
+	findFlag := fmt.Sprintf("Consumer[%s][%s/%s/%s/%s] find provider[%s/%s/%s]",
 		request.ConsumerServiceId, service.Environment, service.AppId, service.ServiceName, service.Version,
-		provider.Environment, provider.AppId, provider.ServiceName, provider.Version)
+		provider.Environment, provider.AppId, provider.ServiceName)
 
 	// cache
 	var item *cache.VersionRuleCacheItem
 	item, err = cache.FindInstances.Get(ctx, service, provider, request.Tags, rev)
 	if err != nil {
-		log.Errorf(err, "FindInstancesCache.Get failed, %s failed", findFlag)
-		return &pb.FindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("FindInstancesCache.Get failed, %s failed", findFlag), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if item == nil {
-		mes := fmt.Errorf("%s failed, provider does not exist", findFlag)
-		log.Errorf(mes, "FindInstancesCache.Get failed")
-		return &pb.FindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, mes.Error()),
-		}, nil
+		err := fmt.Errorf("%s failed, provider does not exist", findFlag)
+		log.Error("FindInstancesCache.Get failed", err)
+		return nil, pb.NewError(pb.ErrServiceNotExists, err.Error())
 	}
 
 	// add dependency queue
 	if len(request.ConsumerServiceId) > 0 &&
 		len(item.ServiceIds) > 0 &&
-		!cache.DependencyRule.ExistVersionRule(ctx, request.ConsumerServiceId, provider) {
+		!cache.DependencyRule.ExistRule(ctx, request.ConsumerServiceId, provider) {
 		provider, err = ds.reshapeProviderKey(ctx, provider, item.ServiceIds[0])
 		if err != nil {
 			return nil, err
 		}
 		if provider != nil {
-			err = serviceUtil.AddServiceVersionRule(ctx, domainProject, service, provider)
+			err = eutil.AddServiceVersionRule(ctx, domainProject, service, provider)
 		} else {
-			mes := fmt.Errorf("%s failed, provider does not exist", findFlag)
-			log.Errorf(mes, "AddServiceVersionRule failed")
-			return &pb.FindInstancesResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists, mes.Error()),
-			}, nil
+			err := fmt.Errorf("%s failed, provider does not exist", findFlag)
+			log.Error("AddServiceVersionRule failed", err)
+			return nil, pb.NewError(pb.ErrServiceNotExists, err.Error())
 		}
 		if err != nil {
-			log.Errorf(err, "AddServiceVersionRule failed, %s failed", findFlag)
-			return &pb.FindInstancesResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
+			log.Error(fmt.Sprintf("AddServiceVersionRule failed, %s failed", findFlag), err)
+			return nil, pb.NewError(pb.ErrInternal, err.Error())
 		}
 	}
 
@@ -1024,17 +718,13 @@ func (ds *MetadataManager) findSharedServiceInstance(ctx context.Context, reques
 	var item *cache.VersionRuleCacheItem
 	item, err = cache.FindInstances.Get(ctx, service, provider, request.Tags, rev)
 	if err != nil {
-		log.Errorf(err, "FindInstancesCache.Get failed, %s failed", findFlag)
-		return &pb.FindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("FindInstancesCache.Get failed, %s failed", findFlag), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if item == nil {
-		mes := fmt.Errorf("%s failed, provider does not exist", findFlag)
-		log.Errorf(mes, "FindInstancesCache.Get failed")
-		return &pb.FindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, mes.Error()),
-		}, nil
+		err := fmt.Errorf("%s failed, provider does not exist", findFlag)
+		log.Error("FindInstancesCache.Get failed", err)
+		return nil, pb.NewError(pb.ErrServiceNotExists, err.Error())
 	}
 
 	return ds.genFindResult(ctx, rev, item)
@@ -1049,103 +739,104 @@ func (ds *MetadataManager) genFindResult(ctx context.Context, oldRev string, ite
 	// TODO support gRPC output context
 	_ = util.WithResponseRev(ctx, item.Rev)
 	return &pb.FindInstancesResponse{
-		Response:  pb.CreateResponse(pb.ResponseSuccess, "Query service instances successfully."),
 		Instances: instances,
 	}, nil
 }
 
 func (ds *MetadataManager) reshapeProviderKey(ctx context.Context, provider *pb.MicroServiceKey, providerID string) (
 	*pb.MicroServiceKey, error) {
-	//维护version的规则,service name 可能是别名，所以重新获取
-	providerService, err := serviceUtil.GetService(ctx, provider.Tenant, providerID)
+	// service name 可能是别名，所以重新获取
+	providerService, err := eutil.GetService(ctx, provider.Tenant, providerID)
 	if err != nil {
 		return nil, err
 	}
 
-	versionRule := provider.Version
 	provider = pb.MicroServiceToKey(provider.Tenant, providerService)
-	provider.Version = versionRule
+	provider.Version = datasource.AllVersions // just compatible to old version
 	return provider, nil
 }
 
-func (ds *MetadataManager) UpdateInstanceStatus(ctx context.Context, request *pb.UpdateInstanceStatusRequest) (*pb.UpdateInstanceStatusResponse, error) {
+func (ds *MetadataManager) PutInstance(ctx context.Context, request *pb.RegisterInstanceRequest) error {
 	domainProject := util.ParseDomainProject(ctx)
-	updateStatusFlag := util.StringJoin([]string{request.ServiceId, request.InstanceId, request.Status}, "/")
-
-	instance, err := serviceUtil.GetInstance(ctx, domainProject, request.ServiceId, request.InstanceId)
+	instance := request.Instance
+	serviceID := instance.ServiceId
+	instanceID := instance.InstanceId
+	exist, err := eutil.ExistInstance(ctx, domainProject, serviceID, instanceID)
 	if err != nil {
-		log.Errorf(err, "update instance[%s] status failed", updateStatusFlag)
-		return &pb.UpdateInstanceStatusResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("update instance[%s/%s] failed", serviceID, instanceID), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
+	}
+	if !exist {
+		log.Error(fmt.Sprintf("update instance[%s/%s] failed, instance does not exist",
+			serviceID, instanceID), nil)
+		return pb.NewError(pb.ErrInstanceNotExists, "Service instance does not exist.")
+	}
+
+	if err := eutil.UpdateInstance(ctx, domainProject, instance); err != nil {
+		log.Error(fmt.Sprintf("update instance[%s/%s] failed", serviceID, instanceID), err)
+		return err
+	}
+	sendEvent(ctx, sync.UpdateAction, datasource.ResourceInstance, instance)
+	log.Info(fmt.Sprintf("update instance[%s/%s] successfully", serviceID, instanceID))
+	return nil
+}
+
+func (ds *MetadataManager) PutInstanceStatus(ctx context.Context, request *pb.UpdateInstanceStatusRequest) error {
+	domainProject := util.ParseDomainProject(ctx)
+	updateStatusFlag := util.StringJoin([]string{request.ServiceId, request.InstanceId, request.Status}, path.SPLIT)
+
+	instance, err := eutil.GetInstance(ctx, domainProject, request.ServiceId, request.InstanceId)
+	if err != nil {
+		log.Error(fmt.Sprintf("update instance[%s] status failed", updateStatusFlag), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if instance == nil {
-		log.Errorf(nil, "update instance[%s] status failed, instance does not exist", updateStatusFlag)
-		return &pb.UpdateInstanceStatusResponse{
-			Response: pb.CreateResponse(pb.ErrInstanceNotExists, "Service instance does not exist."),
-		}, nil
+		log.Error(fmt.Sprintf("update instance[%s] status failed, instance does not exist", updateStatusFlag), nil)
+		return pb.NewError(pb.ErrInstanceNotExists, "Service instance does not exist.")
 	}
 
 	copyInstanceRef := *instance
 	copyInstanceRef.Status = request.Status
+	copyInstanceRef.ModTimestamp = strconv.FormatInt(time.Now().Unix(), 10)
 
-	if err := serviceUtil.UpdateInstance(ctx, domainProject, &copyInstanceRef); err != nil {
-		log.Errorf(err, "update instance[%s] status failed", updateStatusFlag)
-		resp := &pb.UpdateInstanceStatusResponse{
-			Response: pb.CreateResponseWithSCErr(err),
-		}
-		if err.InternalError() {
-			return resp, err
-		}
-		return resp, nil
+	if err := eutil.UpdateInstance(ctx, domainProject, &copyInstanceRef); err != nil {
+		log.Error(fmt.Sprintf("update instance[%s] status failed", updateStatusFlag), err)
+		return err
 	}
-
-	log.Infof("update instance[%s] status successfully", updateStatusFlag)
-	return &pb.UpdateInstanceStatusResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Update service instance status successfully."),
-	}, nil
+	sendEvent(ctx, sync.UpdateAction, datasource.ResourceInstance, copyInstanceRef)
+	log.Info(fmt.Sprintf("update instance[%s] status successfully", updateStatusFlag))
+	return nil
 }
 
-func (ds *MetadataManager) UpdateInstanceProperties(ctx context.Context, request *pb.UpdateInstancePropsRequest) (
-	*pb.UpdateInstancePropsResponse, error) {
+func (ds *MetadataManager) PutInstanceProperties(ctx context.Context, request *pb.UpdateInstancePropsRequest) error {
 	domainProject := util.ParseDomainProject(ctx)
-	instanceFlag := util.StringJoin([]string{request.ServiceId, request.InstanceId}, "/")
+	instanceFlag := util.StringJoin([]string{request.ServiceId, request.InstanceId}, path.SPLIT)
 
-	instance, err := serviceUtil.GetInstance(ctx, domainProject, request.ServiceId, request.InstanceId)
+	instance, err := eutil.GetInstance(ctx, domainProject, request.ServiceId, request.InstanceId)
 	if err != nil {
-		log.Errorf(err, "update instance[%s] properties failed", instanceFlag)
-		return &pb.UpdateInstancePropsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("update instance[%s] properties failed", instanceFlag), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if instance == nil {
-		log.Errorf(nil, "update instance[%s] properties failed, instance does not exist", instanceFlag)
-		return &pb.UpdateInstancePropsResponse{
-			Response: pb.CreateResponse(pb.ErrInstanceNotExists, "Service instance does not exist."),
-		}, nil
+		log.Error(fmt.Sprintf("update instance[%s] properties failed, instance does not exist", instanceFlag), nil)
+		return pb.NewError(pb.ErrInstanceNotExists, "Service instance does not exist.")
 	}
 
 	copyInstanceRef := *instance
 	copyInstanceRef.Properties = request.Properties
+	copyInstanceRef.ModTimestamp = strconv.FormatInt(time.Now().Unix(), 10)
 
-	if err := serviceUtil.UpdateInstance(ctx, domainProject, &copyInstanceRef); err != nil {
-		log.Errorf(err, "update instance[%s] properties failed", instanceFlag)
-		resp := &pb.UpdateInstancePropsResponse{
-			Response: pb.CreateResponseWithSCErr(err),
-		}
-		if err.InternalError() {
-			return resp, err
-		}
-		return resp, nil
+	if err := eutil.UpdateInstance(ctx, domainProject, &copyInstanceRef); err != nil {
+		log.Error(fmt.Sprintf("update instance[%s] properties failed", instanceFlag), err)
+		return err
 	}
 
-	log.Infof("update instance[%s] properties successfully", instanceFlag)
-	return &pb.UpdateInstancePropsResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Update service instance properties successfully."),
-	}, nil
+	sendEvent(ctx, sync.UpdateAction, datasource.ResourceInstance, copyInstanceRef)
+	log.Info(fmt.Sprintf("update instance[%s] properties successfully", instanceFlag))
+	return nil
 }
 
-func (ds *MetadataManager) HeartbeatSet(ctx context.Context, request *pb.HeartbeatSetRequest) (*pb.HeartbeatSetResponse, error) {
+func (ds *MetadataManager) SendManyHeartbeat(ctx context.Context, request *pb.HeartbeatSetRequest) (*pb.HeartbeatSetResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 
 	heartBeatCount := len(request.Instances)
@@ -1154,8 +845,8 @@ func (ds *MetadataManager) HeartbeatSet(ctx context.Context, request *pb.Heartbe
 	noMultiCounter := 0
 	for _, heartbeatElement := range request.Instances {
 		if _, ok := existFlag[heartbeatElement.ServiceId+heartbeatElement.InstanceId]; ok {
-			log.Warnf("instance[%s/%s] is duplicate request heartbeat set",
-				heartbeatElement.ServiceId, heartbeatElement.InstanceId)
+			log.Warn(fmt.Sprintf("instance[%s/%s] is duplicate request heartbeat set",
+				heartbeatElement.ServiceId, heartbeatElement.InstanceId))
 			continue
 		} else {
 			existFlag[heartbeatElement.ServiceId+heartbeatElement.InstanceId] = true
@@ -1164,202 +855,77 @@ func (ds *MetadataManager) HeartbeatSet(ctx context.Context, request *pb.Heartbe
 		gopool.Go(getHeartbeatFunc(ctx, domainProject, instancesHbRst, heartbeatElement))
 	}
 	count := 0
-	successFlag := false
-	failFlag := false
 	instanceHbRstArr := make([]*pb.InstanceHbRst, 0, heartBeatCount)
 	for heartbeat := range instancesHbRst {
 		count++
-		if len(heartbeat.ErrMessage) != 0 {
-			failFlag = true
-		} else {
-			successFlag = true
-		}
 		instanceHbRstArr = append(instanceHbRstArr, heartbeat)
+		sendEvent(ctx, sync.UpdateAction, datasource.ResourceHeartbeat,
+			&pb.HeartbeatRequest{ServiceId: heartbeat.ServiceId, InstanceId: heartbeat.InstanceId})
 		if count == noMultiCounter {
 			close(instancesHbRst)
 		}
 	}
-	if !failFlag && successFlag {
-		log.Infof("batch update heartbeats[%d] successfully", count)
-		return &pb.HeartbeatSetResponse{
-			Response:  pb.CreateResponse(pb.ResponseSuccess, "Heartbeat set successfully."),
-			Instances: instanceHbRstArr,
-		}, nil
-	}
-	log.Errorf(nil, "batch update heartbeats failed, %v", request.Instances)
+	log.Info(fmt.Sprintf("batch update heartbeats, %v", instanceHbRstArr))
 	return &pb.HeartbeatSetResponse{
-		Response:  pb.CreateResponse(pb.ErrInstanceNotExists, "Heartbeat set failed."),
 		Instances: instanceHbRstArr,
 	}, nil
 }
 
-func (ds *MetadataManager) BatchFind(ctx context.Context, request *pb.BatchFindInstancesRequest) (
-	*pb.BatchFindInstancesResponse, error) {
-	response := &pb.BatchFindInstancesResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Batch query service instances successfully."),
-	}
-
-	var err error
-	// find services
-	response.Services, err = ds.batchFindServices(ctx, request)
-	if err != nil {
-		return &pb.BatchFindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-
-	// find instance
-	response.Instances, err = ds.batchFindInstances(ctx, request)
-	if err != nil {
-		return &pb.BatchFindInstancesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-
-	return response, nil
-}
-
-func (ds *MetadataManager) batchFindServices(ctx context.Context, request *pb.BatchFindInstancesRequest) (
-	*pb.BatchFindResult, error) {
-	if len(request.Services) == 0 {
-		return nil, nil
-	}
-	cloneCtx := util.CloneContext(ctx)
-
-	services := &pb.BatchFindResult{}
-	failedResult := make(map[int32]*pb.FindFailedResult)
-	for index, key := range request.Services {
-		findCtx := util.WithRequestRev(cloneCtx, key.Rev)
-		resp, err := ds.FindInstances(findCtx, &pb.FindInstancesRequest{
-			ConsumerServiceId: request.ConsumerServiceId,
-			AppId:             key.Service.AppId,
-			ServiceName:       key.Service.ServiceName,
-			VersionRule:       key.Service.Version,
-			Environment:       key.Service.Environment,
-		})
-		if err != nil {
-			return nil, err
-		}
-		failed, ok := failedResult[resp.Response.GetCode()]
-		serviceUtil.AppendFindResponse(findCtx, int64(index), resp.Response, resp.Instances,
-			&services.Updated, &services.NotModified, &failed)
-		if !ok && failed != nil {
-			failedResult[resp.Response.GetCode()] = failed
-		}
-	}
-	for _, result := range failedResult {
-		services.Failed = append(services.Failed, result)
-	}
-	return services, nil
-}
-
-func (ds *MetadataManager) batchFindInstances(ctx context.Context, request *pb.BatchFindInstancesRequest) (*pb.BatchFindResult, error) {
-	if len(request.Instances) == 0 {
-		return nil, nil
-	}
-	cloneCtx := util.CloneContext(ctx)
-	// can not find the shared provider instances
-	cloneCtx = util.SetTargetDomainProject(cloneCtx, util.ParseDomain(ctx), util.ParseProject(ctx))
-
-	instances := &pb.BatchFindResult{}
-	failedResult := make(map[int32]*pb.FindFailedResult)
-	for index, key := range request.Instances {
-		getCtx := util.WithRequestRev(cloneCtx, key.Rev)
-		resp, err := ds.GetInstance(getCtx, &pb.GetOneInstanceRequest{
-			ConsumerServiceId:  request.ConsumerServiceId,
-			ProviderServiceId:  key.Instance.ServiceId,
-			ProviderInstanceId: key.Instance.InstanceId,
-		})
-		if err != nil {
-			return nil, err
-		}
-		failed, ok := failedResult[resp.Response.GetCode()]
-		serviceUtil.AppendFindResponse(getCtx, int64(index), resp.Response, []*pb.MicroServiceInstance{resp.Instance},
-			&instances.Updated, &instances.NotModified, &failed)
-		if !ok && failed != nil {
-			failedResult[resp.Response.GetCode()] = failed
-		}
-	}
-	for _, result := range failedResult {
-		instances.Failed = append(instances.Failed, result)
-	}
-	return instances, nil
-}
-
-func (ds *MetadataManager) UnregisterInstance(ctx context.Context, request *pb.UnregisterInstanceRequest) (
-	*pb.UnregisterInstanceResponse, error) {
+func (ds *MetadataManager) UnregisterInstance(ctx context.Context, request *pb.UnregisterInstanceRequest) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 	serviceID := request.ServiceId
 	instanceID := request.InstanceId
 
-	instanceFlag := util.StringJoin([]string{serviceID, instanceID}, "/")
+	instanceFlag := util.StringJoin([]string{serviceID, instanceID}, path.SPLIT)
 
 	err := revokeInstance(ctx, domainProject, serviceID, instanceID)
 	if err != nil {
-		log.Errorf(err, "unregister instance failed, instance[%s], operator %s: revoke instance failed",
-			instanceFlag, remoteIP)
-		resp := &pb.UnregisterInstanceResponse{
-			Response: pb.CreateResponseWithSCErr(err),
-		}
-		if err.InternalError() {
-			return resp, err
-		}
-		return resp, nil
+		log.Error(fmt.Sprintf("unregister instance failed, instance[%s], operator %s: revoke instance failed",
+			instanceFlag, remoteIP), err)
+		return err
 	}
-
-	log.Infof("unregister instance[%s], operator %s", instanceFlag, remoteIP)
-	return &pb.UnregisterInstanceResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Unregister service instance successfully."),
-	}, nil
+	sendEvent(ctx, sync.DeleteAction, datasource.ResourceInstance, request)
+	log.Info(fmt.Sprintf("unregister instance[%s], operator %s", instanceFlag, remoteIP))
+	return nil
 }
 
-func (ds *MetadataManager) Heartbeat(ctx context.Context, request *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
+func (ds *MetadataManager) SendHeartbeat(ctx context.Context, request *pb.HeartbeatRequest) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
-	instanceFlag := util.StringJoin([]string{request.ServiceId, request.InstanceId}, "/")
+	instanceFlag := util.StringJoin([]string{request.ServiceId, request.InstanceId}, path.SPLIT)
 
-	_, ttl, err := serviceUtil.HeartbeatUtil(ctx, domainProject, request.ServiceId, request.InstanceId)
+	_, ttl, err := eutil.HeartbeatUtil(ctx, domainProject, request.ServiceId, request.InstanceId)
 	if err != nil {
-		log.Errorf(err, "heartbeat failed, instance[%s]. operator %s",
-			instanceFlag, remoteIP)
-		resp := &pb.HeartbeatResponse{
-			Response: pb.CreateResponseWithSCErr(err),
-		}
-		if err.InternalError() {
-			return resp, err
-		}
-		return resp, nil
+		log.Error(fmt.Sprintf("heartbeat failed, instance[%s]. operator %s",
+			instanceFlag, remoteIP), err)
+		return err
 	}
 
 	if ttl == 0 {
-		log.Errorf(errors.New("connect backend timed out"),
-			"heartbeat successful, but renew instance[%s] failed. operator %s", instanceFlag, remoteIP)
+		log.Error(fmt.Sprintf("heartbeat successful, but renew instance[%s] failed. operator %s", instanceFlag, remoteIP),
+			errors.New("connect backend timed out"))
 	} else {
-		log.Infof("heartbeat successful, renew instance[%s] ttl to %d. operator %s",
-			instanceFlag, ttl, remoteIP)
+		log.Info(fmt.Sprintf("heartbeat successful, renew instance[%s] ttl to %d. operator %s",
+			instanceFlag, ttl, remoteIP))
 	}
-	return &pb.HeartbeatResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess,
-			"Update service instance heartbeat successfully."),
-	}, nil
+	sendEvent(ctx, sync.UpdateAction, datasource.ResourceHeartbeat, request)
+	return nil
 }
 
-func (ds *MetadataManager) GetAllInstances(ctx context.Context, request *pb.GetAllInstancesRequest) (*pb.GetAllInstancesResponse, error) {
+func (ds *MetadataManager) ListManyInstances(ctx context.Context, request *pb.GetAllInstancesRequest) (*pb.GetAllInstancesResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
-	key := path.GetInstanceRootKey(domainProject) + "/"
-	opts := append(serviceUtil.FromContext(ctx), client.WithStrKey(key), client.WithPrefix())
-	kvs, err := kv.Store().Instance().Search(ctx, opts...)
+	key := path.GetInstanceRootKey(domainProject) + path.SPLIT
+	opts := append(eutil.FromContext(ctx), etcdadpt.WithStrKey(key), etcdadpt.WithPrefix())
+	kvs, err := sd.Instance().Search(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
-	resp := &pb.GetAllInstancesResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get all instances successfully"),
-	}
+	resp := &pb.GetAllInstancesResponse{}
 	for _, keyValue := range kvs.Kvs {
 		instance, ok := keyValue.Value.(*pb.MicroServiceInstance)
 		if !ok {
-			log.Warnf("Unexpected value format! %s", util.BytesToStringWithNoCopy(keyValue.Key))
+			log.Warn(fmt.Sprintf("Unexpected value format! %s", util.BytesToStringWithNoCopy(keyValue.Key)))
 			continue
 		}
 		resp.Instances = append(resp.Instances, instance)
@@ -1373,37 +939,24 @@ func (ds *MetadataManager) ModifySchemas(ctx context.Context, request *pb.Modify
 	serviceID := request.ServiceId
 	domainProject := util.ParseDomainProject(ctx)
 
-	serviceInfo, err := serviceUtil.GetService(ctx, domainProject, serviceID)
+	serviceInfo, err := eutil.GetService(ctx, domainProject, serviceID)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("modify service[%s] schemas failed, service does not exist in db, operator: %s",
 				serviceID, remoteIP))
-			return &pb.ModifySchemasResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-			}, nil
+			return nil, pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 		}
 		log.Error(fmt.Sprintf("modify service[%s] schemas failed, get service failed, operator: %s",
 			serviceID, remoteIP), err)
-		return &pb.ModifySchemasResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
-	respErr := ds.modifySchemas(ctx, domainProject, serviceInfo, request.Schemas)
-	if respErr != nil {
-		log.Error(fmt.Sprintf("modify service[%s] schemas failed, operator: %s", serviceID, remoteIP), nil)
-		resp := &pb.ModifySchemasResponse{
-			Response: pb.CreateResponseWithSCErr(respErr),
-		}
-		if respErr.InternalError() {
-			return resp, respErr
-		}
-		return resp, nil
+	if respErr := ds.modifySchemas(ctx, domainProject, serviceInfo, request.Schemas); respErr != nil {
+		log.Error(fmt.Sprintf("modify service[%s] schemas failed, operator: %s", serviceID, remoteIP), respErr)
+		return nil, respErr
 	}
 
-	return &pb.ModifySchemasResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "modify schemas info successfully."),
-	}, nil
+	return &pb.ModifySchemasResponse{}, nil
 }
 
 func (ds *MetadataManager) ModifySchema(ctx context.Context, request *pb.ModifySchemaRequest) (
@@ -1419,57 +972,40 @@ func (ds *MetadataManager) ModifySchema(ctx context.Context, request *pb.ModifyS
 	}
 	err := ds.modifySchema(ctx, serviceID, &schema)
 	if err != nil {
-		log.Errorf(err, "modify schema[%s/%s] failed, operator: %s", serviceID, schemaID, remoteIP)
-		resp := &pb.ModifySchemaResponse{
-			Response: pb.CreateResponseWithSCErr(err),
-		}
-		if err.InternalError() {
-			return resp, err
-		}
-		return resp, nil
+		log.Error(fmt.Sprintf("modify schema[%s/%s] failed, operator: %s", serviceID, schemaID, remoteIP), err)
+		return nil, err
 	}
 
-	log.Infof("modify schema[%s/%s] successfully, operator: %s", serviceID, schemaID, remoteIP)
-	return &pb.ModifySchemaResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "modify schema info success"),
-	}, nil
+	log.Info(fmt.Sprintf("modify schema[%s/%s] successfully, operator: %s", serviceID, schemaID, remoteIP))
+	return &pb.ModifySchemaResponse{}, nil
 }
 
 func (ds *MetadataManager) ExistSchema(ctx context.Context, request *pb.GetExistenceRequest) (
 	*pb.GetExistenceResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Warnf("schema[%s/%s] exist failed, service does not exist", request.ServiceId, request.SchemaId)
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "service does not exist."),
-		}, nil
+	if !eutil.ServiceExist(ctx, domainProject, request.ServiceId) {
+		log.Warn(fmt.Sprintf("schema[%s/%s] exist failed, service does not exist", request.ServiceId, request.SchemaId))
+		return nil, pb.NewError(pb.ErrServiceNotExists, "service does not exist.")
 	}
 
 	key := path.GenerateServiceSchemaKey(domainProject, request.ServiceId, request.SchemaId)
 	exist, err := checkSchemaInfoExist(ctx, key)
 	if err != nil {
-		log.Errorf(err, "schema[%s/%s] exist failed, get schema failed", request.ServiceId, request.SchemaId)
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("schema[%s/%s] exist failed, get schema failed", request.ServiceId, request.SchemaId), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if !exist {
-		log.Infof("schema[%s/%s] exist failed, schema does not exist", request.ServiceId, request.SchemaId)
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrSchemaNotExists, "schema does not exist."),
-		}, nil
+		log.Info(fmt.Sprintf("schema[%s/%s] exist failed, schema does not exist", request.ServiceId, request.SchemaId))
+		return nil, schema.ErrSchemaNotFound
 	}
 	schemaSummary, err := getSchemaSummary(ctx, domainProject, request.ServiceId, request.SchemaId)
 	if err != nil {
-		log.Errorf(err, "schema[%s/%s] exist failed, get schema summary failed",
-			request.ServiceId, request.SchemaId)
-		return &pb.GetExistenceResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("schema[%s/%s] exist failed, get schema summary failed",
+			request.ServiceId, request.SchemaId), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 	return &pb.GetExistenceResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Schema exist."),
 		SchemaId: request.SchemaId,
 		Summary:  schemaSummary,
 	}, nil
@@ -1478,42 +1014,33 @@ func (ds *MetadataManager) ExistSchema(ctx context.Context, request *pb.GetExist
 func (ds *MetadataManager) GetSchema(ctx context.Context, request *pb.GetSchemaRequest) (*pb.GetSchemaResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "get schema[%s/%s] failed, service does not exist",
-			request.ServiceId, request.SchemaId)
-		return &pb.GetSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+	if !eutil.ServiceExist(ctx, domainProject, request.ServiceId) {
+		log.Error(fmt.Sprintf("get schema[%s/%s] failed, service does not exist",
+			request.ServiceId, request.SchemaId), nil)
+		return nil, pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
 	key := path.GenerateServiceSchemaKey(domainProject, request.ServiceId, request.SchemaId)
-	opts := append(serviceUtil.FromContext(ctx), client.WithStrKey(key))
-	resp, errDo := kv.Store().Schema().Search(ctx, opts...)
+	opts := append(eutil.FromContext(ctx), etcdadpt.WithStrKey(key))
+	resp, errDo := sd.Schema().Search(ctx, opts...)
 	if errDo != nil {
-		log.Errorf(errDo, "get schema[%s/%s] failed", request.ServiceId, request.SchemaId)
-		return &pb.GetSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, errDo.Error()),
-		}, errDo
+		log.Error(fmt.Sprintf("get schema[%s/%s] failed", request.ServiceId, request.SchemaId), errDo)
+		return nil, pb.NewError(pb.ErrUnavailableBackend, errDo.Error())
 	}
 	if resp.Count == 0 {
-		log.Errorf(errDo, "get schema[%s/%s] failed, schema does not exists",
-			request.ServiceId, request.SchemaId)
-		return &pb.GetSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrSchemaNotExists, "Do not have this schema info."),
-		}, nil
+		log.Error(fmt.Sprintf("get schema[%s/%s] failed, schema does not exists",
+			request.ServiceId, request.SchemaId), errDo)
+		return nil, schema.ErrSchemaNotFound
 	}
 
 	schemaSummary, err := getSchemaSummary(ctx, domainProject, request.ServiceId, request.SchemaId)
 	if err != nil {
-		log.Errorf(err, "get schema[%s/%s] failed, get schema summary failed",
-			request.ServiceId, request.SchemaId)
-		return &pb.GetSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("get schema[%s/%s] failed, get schema summary failed",
+			request.ServiceId, request.SchemaId), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	return &pb.GetSchemaResponse{
-		Response:      pb.CreateResponse(pb.ResponseSuccess, "Get schema info successfully."),
 		Schema:        util.BytesToStringWithNoCopy(resp.Kvs[0].Value.([]byte)),
 		SchemaSummary: schemaSummary,
 	}, nil
@@ -1523,48 +1050,39 @@ func (ds *MetadataManager) GetAllSchemas(ctx context.Context, request *pb.GetAll
 	*pb.GetAllSchemaResponse, error) {
 	domainProject := util.ParseDomainProject(ctx)
 
-	service, err := serviceUtil.GetService(ctx, domainProject, request.ServiceId)
+	service, err := eutil.GetService(ctx, domainProject, request.ServiceId)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("get service[%s] all schemas failed, service does not exist in db", request.ServiceId))
-			return &pb.GetAllSchemaResponse{
-				Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-			}, nil
+			return nil, pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 		}
 		log.Error(fmt.Sprintf("get service[%s] all schemas failed, get service failed", request.ServiceId), err)
-		return &pb.GetAllSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	schemasList := service.Schemas
 	if len(schemasList) == 0 {
 		return &pb.GetAllSchemaResponse{
-			Response: pb.CreateResponse(pb.ResponseSuccess, "Do not have this schema info."),
-			Schemas:  []*pb.Schema{},
+			Schemas: []*pb.Schema{},
 		}, nil
 	}
 
 	key := path.GenerateServiceSchemaSummaryKey(domainProject, request.ServiceId, "")
-	opts := append(serviceUtil.FromContext(ctx), client.WithStrKey(key), client.WithPrefix())
-	resp, errDo := kv.Store().SchemaSummary().Search(ctx, opts...)
+	opts := append(eutil.FromContext(ctx), etcdadpt.WithStrKey(key), etcdadpt.WithPrefix())
+	resp, errDo := sd.SchemaSummary().Search(ctx, opts...)
 	if errDo != nil {
-		log.Errorf(errDo, "get service[%s] all schema summaries failed", request.ServiceId)
-		return &pb.GetAllSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, errDo.Error()),
-		}, errDo
+		log.Error(fmt.Sprintf("get service[%s] all schema summaries failed", request.ServiceId), errDo)
+		return nil, pb.NewError(pb.ErrUnavailableBackend, errDo.Error())
 	}
 
-	respWithSchema := &sd.Response{}
+	respWithSchema := &kvstore.Response{}
 	if request.WithSchema {
 		key := path.GenerateServiceSchemaKey(domainProject, request.ServiceId, "")
-		opts := append(serviceUtil.FromContext(ctx), client.WithStrKey(key), client.WithPrefix())
-		respWithSchema, errDo = kv.Store().Schema().Search(ctx, opts...)
+		opts := append(eutil.FromContext(ctx), etcdadpt.WithStrKey(key), etcdadpt.WithPrefix())
+		respWithSchema, errDo = sd.Schema().Search(ctx, opts...)
 		if errDo != nil {
-			log.Errorf(errDo, "get service[%s] all schemas failed", request.ServiceId)
-			return &pb.GetAllSchemaResponse{
-				Response: pb.CreateResponse(pb.ErrUnavailableBackend, errDo.Error()),
-			}, errDo
+			log.Error(fmt.Sprintf("get service[%s] all schemas failed", request.ServiceId), errDo)
+			return nil, pb.NewError(pb.ErrUnavailableBackend, errDo.Error())
 		}
 	}
 
@@ -1589,157 +1107,125 @@ func (ds *MetadataManager) GetAllSchemas(ctx context.Context, request *pb.GetAll
 	}
 
 	return &pb.GetAllSchemaResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get all schema info successfully."),
-		Schemas:  schemas,
+		Schemas: schemas,
 	}, nil
 }
 
-func (ds *MetadataManager) DeleteSchema(ctx context.Context, request *pb.DeleteSchemaRequest) (
-	*pb.DeleteSchemaResponse, error) {
+func (ds *MetadataManager) DeleteSchema(ctx context.Context, request *pb.DeleteSchemaRequest) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "delete schema[%s/%s] failed, service does not exist, operator: %s",
-			request.ServiceId, request.SchemaId, remoteIP)
-		return &pb.DeleteSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
 	key := path.GenerateServiceSchemaKey(domainProject, request.ServiceId, request.SchemaId)
-	exist, err := serviceUtil.CheckSchemaInfoExist(ctx, key)
+	exist, err := eutil.CheckSchemaInfoExist(ctx, key)
 	if err != nil {
-		log.Errorf(err, "delete schema[%s/%s] failed, operator: %s",
-			request.ServiceId, request.SchemaId, remoteIP)
-		return &pb.DeleteSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("delete schema[%s/%s] failed, operator: %s",
+			request.ServiceId, request.SchemaId, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 	if !exist {
-		log.Errorf(nil, "delete schema[%s/%s] failed, schema does not exist, operator: %s",
-			request.ServiceId, request.SchemaId, remoteIP)
-		return &pb.DeleteSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrSchemaNotExists, "Schema info does not exist."),
-		}, nil
+		log.Error(fmt.Sprintf("delete schema[%s/%s] failed, schema does not exist, operator: %s",
+			request.ServiceId, request.SchemaId, remoteIP), nil)
+		return schema.ErrSchemaNotFound
 	}
 	epSummaryKey := path.GenerateServiceSchemaSummaryKey(domainProject, request.ServiceId, request.SchemaId)
-	opts := []client.PluginOp{
-		client.OpDel(client.WithStrKey(epSummaryKey)),
-		client.OpDel(client.WithStrKey(key)),
+	opts := []etcdadpt.OpOptions{etcdadpt.OpDel(etcdadpt.WithStrKey(epSummaryKey)), etcdadpt.OpDel(etcdadpt.WithStrKey(key))}
+	schemaKeyOpt, err := esync.GenDeleteOpts(ctx, datasource.ResourceKV, key, key)
+	if err != nil {
+		log.Error("fail to create delete opts", err)
+		return err
 	}
+	opts = append(opts, schemaKeyOpt...)
+	schemaSummaryKeyOpt, err := esync.GenDeleteOpts(ctx, datasource.ResourceKV, epSummaryKey, epSummaryKey)
+	if err != nil {
+		log.Error("fail to create delete opts", err)
+		return err
+	}
+	opts = append(opts, schemaSummaryKeyOpt...)
 
-	resp, errDo := client.Instance().TxnWithCmp(ctx, opts,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, request.ServiceId))),
-			client.CmpNotEqual, 0)},
+	resp, errDo := etcdadpt.TxnWithCmp(ctx, opts,
+		etcdadpt.If(etcdadpt.NotEqualVer(path.GenerateServiceKey(domainProject, request.ServiceId), 0)),
 		nil)
+
 	if errDo != nil {
-		log.Errorf(errDo, "delete schema[%s/%s] failed, operator: %s",
-			request.ServiceId, request.SchemaId, remoteIP)
-		return &pb.DeleteSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, errDo.Error()),
-		}, errDo
+		log.Error(fmt.Sprintf("delete schema[%s/%s] failed, operator: %s",
+			request.ServiceId, request.SchemaId, remoteIP), errDo)
+		return pb.NewError(pb.ErrUnavailableBackend, errDo.Error())
 	}
 	if !resp.Succeeded {
-		log.Errorf(nil, "delete schema[%s/%s] failed, service does not exist, operator: %s",
-			request.ServiceId, request.SchemaId, remoteIP)
-		return &pb.DeleteSchemaResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+		log.Error(fmt.Sprintf("delete schema[%s/%s] failed, service does not exist, operator: %s",
+			request.ServiceId, request.SchemaId, remoteIP), nil)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	log.Infof("delete schema[%s/%s] info successfully, operator: %s",
-		request.ServiceId, request.SchemaId, remoteIP)
-	return &pb.DeleteSchemaResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Delete schema info successfully."),
-	}, nil
+	log.Info(fmt.Sprintf("delete schema[%s/%s] info successfully, operator: %s",
+		request.ServiceId, request.SchemaId, remoteIP))
+	return nil
 }
 
-func (ds *MetadataManager) AddTags(ctx context.Context, request *pb.AddServiceTagsRequest) (*pb.AddServiceTagsResponse, error) {
+func (ds *MetadataManager) PutManyTags(ctx context.Context, request *pb.AddServiceTagsRequest) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 
 	// service id存在性校验
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "add service[%s]'s tags %v failed, service does not exist, operator: %s",
-			request.ServiceId, request.Tags, remoteIP)
-		return &pb.AddServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+	if !eutil.ServiceExist(ctx, domainProject, request.ServiceId) {
+		log.Error(fmt.Sprintf("add service[%s]'s tags %v failed, service does not exist, operator: %s",
+			request.ServiceId, request.Tags, remoteIP), nil)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	checkErr := serviceUtil.AddTagIntoETCD(ctx, domainProject, request.ServiceId, request.Tags)
+	checkErr := eutil.AddTagIntoETCD(ctx, domainProject, request.ServiceId, request.Tags)
 	if checkErr != nil {
-		log.Errorf(checkErr, "add service[%s]'s tags %v failed, operator: %s", request.ServiceId, request.Tags, remoteIP)
-		resp := &pb.AddServiceTagsResponse{
-			Response: pb.CreateResponseWithSCErr(checkErr),
-		}
-		if checkErr.InternalError() {
-			return resp, checkErr
-		}
-		return resp, nil
+		log.Error(fmt.Sprintf("add service[%s]'s tags %v failed, operator: %s",
+			request.ServiceId, request.Tags, remoteIP), checkErr)
+		return checkErr
 	}
 
-	log.Infof("add service[%s]'s tags %v successfully, operator: %s", request.ServiceId, request.Tags, remoteIP)
-	return &pb.AddServiceTagsResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Add service tags successfully."),
-	}, nil
+	log.Info(fmt.Sprintf("add service[%s]'s tags %v successfully, operator: %s", request.ServiceId, request.Tags, remoteIP))
+	return nil
 }
 
-func (ds *MetadataManager) GetTags(ctx context.Context, request *pb.GetServiceTagsRequest) (*pb.GetServiceTagsResponse, error) {
+func (ds *MetadataManager) ListTag(ctx context.Context, request *pb.GetServiceTagsRequest) (*pb.GetServiceTagsResponse, error) {
 	var err error
 	domainProject := util.ParseDomainProject(ctx)
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(err, "get service[%s]'s tags failed, service does not exist", request.ServiceId)
-		return &pb.GetServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+	if !eutil.ServiceExist(ctx, domainProject, request.ServiceId) {
+		log.Error(fmt.Sprintf("get service[%s]'s tags failed, service does not exist", request.ServiceId), err)
+		return nil, pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
-	tags, err := serviceUtil.GetTagsUtils(ctx, domainProject, request.ServiceId)
+	tags, err := eutil.GetTagsUtils(ctx, domainProject, request.ServiceId)
 	if err != nil {
-		log.Errorf(err, "get service[%s]'s tags failed, get tags failed", request.ServiceId)
-		return &pb.GetServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("get service[%s]'s tags failed, get tags failed", request.ServiceId), err)
+		return nil, pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	return &pb.GetServiceTagsResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get service tags successfully."),
-		Tags:     tags,
+		Tags: tags,
 	}, nil
 }
 
-func (ds *MetadataManager) UpdateTag(ctx context.Context, request *pb.UpdateServiceTagRequest) (*pb.UpdateServiceTagResponse, error) {
+func (ds *MetadataManager) PutTag(ctx context.Context, request *pb.UpdateServiceTagRequest) error {
 	var err error
 	remoteIP := util.GetIPFromContext(ctx)
-	tagFlag := util.StringJoin([]string{request.Key, request.Value}, "/")
+	tagFlag := util.StringJoin([]string{request.Key, request.Value}, path.SPLIT)
 	domainProject := util.ParseDomainProject(ctx)
 
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(err, "update service[%s]'s tag[%s] failed, service does not exist, operator: %s",
-			request.ServiceId, tagFlag, remoteIP)
-		return &pb.UpdateServiceTagResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+	if !eutil.ServiceExist(ctx, domainProject, request.ServiceId) {
+		log.Error(fmt.Sprintf("update service[%s]'s tag[%s] failed, service does not exist, operator: %s",
+			request.ServiceId, tagFlag, remoteIP), err)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	tags, err := serviceUtil.GetTagsUtils(ctx, domainProject, request.ServiceId)
+	tags, err := eutil.GetTagsUtils(ctx, domainProject, request.ServiceId)
 	if err != nil {
-		log.Errorf(err, "update service[%s]'s tag[%s] failed, get tag failed, operator: %s",
-			request.ServiceId, tagFlag, remoteIP)
-		return &pb.UpdateServiceTagResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("update service[%s]'s tag[%s] failed, get tag failed, operator: %s",
+			request.ServiceId, tagFlag, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	//check if the tag exists
 	if _, ok := tags[request.Key]; !ok {
-		log.Errorf(nil, "update service[%s]'s tag[%s] failed, tag does not exist, operator: %s",
-			request.ServiceId, tagFlag, remoteIP)
-		return &pb.UpdateServiceTagResponse{
-			Response: pb.CreateResponse(pb.ErrTagNotExists, "Tag does not exist, please add one first."),
-		}, nil
+		log.Error(fmt.Sprintf("update service[%s]'s tag[%s] failed, tag does not exist, operator: %s",
+			request.ServiceId, tagFlag, remoteIP), nil)
+		return pb.NewError(pb.ErrTagNotExists, "Tag does not exist, please add one first.")
 	}
 
 	copyTags := make(map[string]string, len(tags))
@@ -1748,43 +1234,32 @@ func (ds *MetadataManager) UpdateTag(ctx context.Context, request *pb.UpdateServ
 	}
 	copyTags[request.Key] = request.Value
 
-	checkErr := serviceUtil.AddTagIntoETCD(ctx, domainProject, request.ServiceId, copyTags)
+	checkErr := eutil.AddTagIntoETCD(ctx, domainProject, request.ServiceId, copyTags)
 	if checkErr != nil {
-		log.Errorf(checkErr, "update service[%s]'s tag[%s] failed, operator: %s", request.ServiceId, tagFlag, remoteIP)
-		resp := &pb.UpdateServiceTagResponse{
-			Response: pb.CreateResponseWithSCErr(checkErr),
-		}
-		if checkErr.InternalError() {
-			return resp, checkErr
-		}
-		return resp, nil
+		log.Error(fmt.Sprintf("update service[%s]'s tag[%s] failed, operator: %s",
+			request.ServiceId, tagFlag, remoteIP), checkErr)
+		return checkErr
 	}
 
-	log.Infof("update service[%s]'s tag[%s] successfully, operator: %s", request.ServiceId, tagFlag, remoteIP)
-	return &pb.UpdateServiceTagResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Update service tag success."),
-	}, nil
+	log.Info(fmt.Sprintf("update service[%s]'s tag[%s] successfully, operator: %s", request.ServiceId, tagFlag, remoteIP))
+	return nil
 }
 
-func (ds *MetadataManager) DeleteTags(ctx context.Context, request *pb.DeleteServiceTagsRequest) (*pb.DeleteServiceTagsResponse, error) {
+func (ds *MetadataManager) DeleteManyTags(ctx context.Context, request *pb.DeleteServiceTagsRequest) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "delete service[%s]'s tags %v failed, service does not exist, operator: %s",
-			request.ServiceId, request.Keys, remoteIP)
-		return &pb.DeleteServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+	if !eutil.ServiceExist(ctx, domainProject, request.ServiceId) {
+		log.Error(fmt.Sprintf("delete service[%s]'s tags %v failed, service does not exist, operator: %s",
+			request.ServiceId, request.Keys, remoteIP), nil)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	tags, err := serviceUtil.GetTagsUtils(ctx, domainProject, request.ServiceId)
+	tags, err := eutil.GetTagsUtils(ctx, domainProject, request.ServiceId)
 	if err != nil {
-		log.Errorf(err, "delete service[%s]'s tags %v failed, get service tags failed, operator: %s",
-			request.ServiceId, request.Keys, remoteIP)
-		return &pb.DeleteServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("delete service[%s]'s tags %v failed, get service tags failed, operator: %s",
+			request.ServiceId, request.Keys, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	copyTags := make(map[string]string, len(tags))
@@ -1793,11 +1268,9 @@ func (ds *MetadataManager) DeleteTags(ctx context.Context, request *pb.DeleteSer
 	}
 	for _, key := range request.Keys {
 		if _, ok := copyTags[key]; !ok {
-			log.Errorf(nil, "delete service[%s]'s tags %v failed, tag[%s] does not exist, operator: %s",
-				request.ServiceId, request.Keys, key, remoteIP)
-			return &pb.DeleteServiceTagsResponse{
-				Response: pb.CreateResponse(pb.ErrTagNotExists, "Delete tags failed for this key "+key+" does not exist."),
-			}, nil
+			log.Error(fmt.Sprintf("delete service[%s]'s tags %v failed, tag[%s] does not exist, operator: %s",
+				request.ServiceId, request.Keys, key, remoteIP), nil)
+			return pb.NewError(pb.ErrTagNotExists, "Delete tags failed for this key "+key+" does not exist.")
 		}
 		delete(copyTags, key)
 	}
@@ -1805,473 +1278,95 @@ func (ds *MetadataManager) DeleteTags(ctx context.Context, request *pb.DeleteSer
 	// the capacity of tags may be 0
 	data, err := json.Marshal(copyTags)
 	if err != nil {
-		log.Errorf(err, "delete service[%s]'s tags %v failed, marshall service tags failed, operator: %s",
-			request.ServiceId, request.Keys, remoteIP)
-		return &pb.DeleteServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
+		log.Error(fmt.Sprintf("delete service[%s]'s tags %v failed, marshall service tags failed, operator: %s",
+			request.ServiceId, request.Keys, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	key := path.GenerateServiceTagKey(domainProject, request.ServiceId)
 
-	resp, err := client.Instance().TxnWithCmp(ctx,
-		[]client.PluginOp{client.OpPut(client.WithStrKey(key), client.WithValue(data))},
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, request.ServiceId))),
-			client.CmpNotEqual, 0)},
-		nil)
+	opts := etcdadpt.Ops(etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(data)))
+	syncOpts, err := esync.GenDeleteOpts(ctx, datasource.ResourceKV, key, data,
+		esync.WithOpts(map[string]string{"key": key}))
 	if err != nil {
-		log.Errorf(err, "delete service[%s]'s tags %v failed, operator: %s",
-			request.ServiceId, request.Keys, remoteIP)
-		return &pb.DeleteServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
+		return pb.NewError(pb.ErrInternal, err.Error())
+	}
+	opts = append(opts, syncOpts...)
+
+	resp, err := etcdadpt.TxnWithCmp(ctx, opts,
+		etcdadpt.If(etcdadpt.NotEqualVer(path.GenerateServiceKey(domainProject, request.ServiceId), 0)), nil)
+	if err != nil {
+		log.Error(fmt.Sprintf("delete service[%s]'s tags %v failed, operator: %s",
+			request.ServiceId, request.Keys, remoteIP), err)
+		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 	if !resp.Succeeded {
-		log.Errorf(err, "delete service[%s]'s tags %v failed, service does not exist, operator: %s",
-			request.ServiceId, request.Keys, remoteIP)
-		return &pb.DeleteServiceTagsResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
+		log.Error(fmt.Sprintf("delete service[%s]'s tags %v failed, service does not exist, operator: %s",
+			request.ServiceId, request.Keys, remoteIP), err)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	log.Infof("delete service[%s]'s tags %v successfully, operator: %s", request.ServiceId, request.Keys, remoteIP)
-	return &pb.DeleteServiceTagsResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Delete service tags successfully."),
-	}, nil
-}
-
-func (ds *MetadataManager) AddRule(ctx context.Context, request *pb.AddServiceRulesRequest) (
-	*pb.AddServiceRulesResponse, error) {
-	remoteIP := util.GetIPFromContext(ctx)
-	domainProject := util.ParseDomainProject(ctx)
-
-	// service id存在性校验
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "add service[%s] rule failed, service does not exist, operator: %s",
-			request.ServiceId, remoteIP)
-		return &pb.AddServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrInvalidParams, "Service does not exist."),
-		}, nil
-	}
-	res := quota.NewApplyQuotaResource(quota.TypeRule, domainProject, request.ServiceId, int64(len(request.Rules)))
-	errQuota := quota.Apply(ctx, res)
-	if errQuota != nil {
-		log.Errorf(errQuota, "add service[%s] rule failed, operator: %s", request.ServiceId, remoteIP)
-		response := &pb.AddServiceRulesResponse{
-			Response: pb.CreateResponseWithSCErr(errQuota),
-		}
-		if errQuota.InternalError() {
-			return response, errQuota
-		}
-		return response, nil
-	}
-
-	ruleType, _, err := serviceUtil.GetServiceRuleType(ctx, domainProject, request.ServiceId)
-	if err != nil {
-		return &pb.AddServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-	ruleIDs := make([]string, 0, len(request.Rules))
-	opts := make([]client.PluginOp, 0, 2*len(request.Rules))
-	for _, rule := range request.Rules {
-		//黑白名单只能存在一种，黑名单 or 白名单
-		if len(ruleType) == 0 {
-			ruleType = rule.RuleType
-		} else if ruleType != rule.RuleType {
-			log.Errorf(nil,
-				"add service[%s] rule failed, can not add different RuleType at the same time, operator: %s",
-				request.ServiceId, remoteIP)
-			return &pb.AddServiceRulesResponse{
-				Response: pb.CreateResponse(pb.ErrBlackAndWhiteRule,
-					"Service can only contain one rule type, BLACK or WHITE."),
-			}, nil
-
-		}
-
-		//同一服务，attribute和pattern确定一个rule
-		if serviceUtil.RuleExist(ctx, domainProject, request.ServiceId, rule.Attribute, rule.Pattern) {
-			log.Infof("service[%s] rule[%s/%s] already exists, operator: %s",
-				request.ServiceId, rule.Attribute, rule.Pattern, remoteIP)
-			continue
-		}
-
-		// 产生全局rule id
-		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-		ruleAdd := &pb.ServiceRule{
-			RuleId:       util.GenerateUUID(),
-			RuleType:     rule.RuleType,
-			Attribute:    rule.Attribute,
-			Pattern:      rule.Pattern,
-			Description:  rule.Description,
-			Timestamp:    timestamp,
-			ModTimestamp: timestamp,
-		}
-
-		key := path.GenerateServiceRuleKey(domainProject, request.ServiceId, ruleAdd.RuleId)
-		indexKey := path.GenerateRuleIndexKey(domainProject, request.ServiceId, ruleAdd.Attribute, ruleAdd.Pattern)
-		ruleIDs = append(ruleIDs, ruleAdd.RuleId)
-
-		data, err := json.Marshal(ruleAdd)
-		if err != nil {
-			log.Errorf(err, "add service[%s] rule failed, marshal rule[%s/%s] failed, operator: %s",
-				request.ServiceId, ruleAdd.Attribute, ruleAdd.Pattern, remoteIP)
-			return &pb.AddServiceRulesResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
-		}
-
-		opts = append(opts, client.OpPut(client.WithStrKey(key), client.WithValue(data)))
-		opts = append(opts, client.OpPut(client.WithStrKey(indexKey), client.WithStrValue(ruleAdd.RuleId)))
-	}
-	if len(opts) <= 0 {
-		log.Infof("add service[%s] rule successfully, no rules to add, operator: %s",
-			request.ServiceId, remoteIP)
-		return &pb.AddServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ResponseSuccess, "Service rules has been added."),
-		}, nil
-	}
-
-	resp, err := client.BatchCommitWithCmp(ctx, opts,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, request.ServiceId))),
-			client.CmpNotEqual, 0)},
-		nil)
-	if err != nil {
-		log.Errorf(err, "add service[%s] rule failed, operator: %s", request.ServiceId, remoteIP)
-		return &pb.AddServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
-	}
-	if !resp.Succeeded {
-		log.Errorf(nil, "add service[%s] rule failed, service does not exist, operator: %s",
-			request.ServiceId, remoteIP)
-		return &pb.AddServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
-	log.Infof("add service[%s] rule %v successfully, operator: %s", request.ServiceId, ruleIDs, remoteIP)
-	return &pb.AddServiceRulesResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Add service rules successfully."),
-		RuleIds:  ruleIDs,
-	}, nil
-}
-
-func (ds *MetadataManager) GetRules(ctx context.Context, request *pb.GetServiceRulesRequest) (
-	*pb.GetServiceRulesResponse, error) {
-	domainProject := util.ParseDomainProject(ctx)
-
-	// service id存在性校验
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "get service[%s] rule failed, service does not exist", request.ServiceId)
-		return &pb.GetServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
-	rules, err := serviceUtil.GetRulesUtil(ctx, domainProject, request.ServiceId)
-	if err != nil {
-		log.Errorf(err, "get service[%s] rule failed", request.ServiceId)
-		return &pb.GetServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-
-	return &pb.GetServiceRulesResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get service rules successfully."),
-		Rules:    rules,
-	}, nil
-}
-
-func (ds *MetadataManager) UpdateRule(ctx context.Context, request *pb.UpdateServiceRuleRequest) (
-	*pb.UpdateServiceRuleResponse, error) {
-	remoteIP := util.GetIPFromContext(ctx)
-	domainProject := util.ParseDomainProject(ctx)
-
-	// service id存在性校验
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "update service rule[%s/%s] failed, service does not exist, operator: %s",
-			request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
-	//是否能改变ruleType
-	ruleType, ruleNum, err := serviceUtil.GetServiceRuleType(ctx, domainProject, request.ServiceId)
-	if err != nil {
-		log.Errorf(err, "update service rule[%s/%s] failed, get rule type failed, operator: %s",
-			request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-	if ruleNum >= 1 && ruleType != request.Rule.RuleType {
-		log.Errorf(err, "update service rule[%s/%s] failed, can only exist one type, current type is %s, operator: %s",
-			request.ServiceId, request.RuleId, ruleType, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrModifyRuleNotAllow, "Exist multiple rules,can not change rule type. Rule type is "+ruleType),
-		}, nil
-	}
-
-	rule, err := serviceUtil.GetOneRule(ctx, domainProject, request.ServiceId, request.RuleId)
-	if err != nil {
-		log.Errorf(err, "update service rule[%s/%s] failed, query service rule failed, operator: %s",
-			request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-	if rule == nil {
-		log.Errorf(err, "update service rule[%s/%s] failed, service rule does not exist, operator: %s",
-			request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrRuleNotExists, "This rule does not exist."),
-		}, nil
-	}
-
-	copyRuleRef := *rule
-	oldRulePatten := copyRuleRef.Pattern
-	oldRuleAttr := copyRuleRef.Attribute
-	isChangeIndex := false
-	if copyRuleRef.Attribute != request.Rule.Attribute {
-		isChangeIndex = true
-		copyRuleRef.Attribute = request.Rule.Attribute
-	}
-	if copyRuleRef.Pattern != request.Rule.Pattern {
-		isChangeIndex = true
-		copyRuleRef.Pattern = request.Rule.Pattern
-	}
-	copyRuleRef.RuleType = request.Rule.RuleType
-	copyRuleRef.Description = request.Rule.Description
-	copyRuleRef.ModTimestamp = strconv.FormatInt(time.Now().Unix(), 10)
-
-	key := path.GenerateServiceRuleKey(domainProject, request.ServiceId, request.RuleId)
-	data, err := json.Marshal(copyRuleRef)
-	if err != nil {
-		log.Errorf(err, "update service rule[%s/%s] failed, marshal service rule failed, operator: %s",
-			request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-		}, err
-	}
-	var opts []client.PluginOp
-	if isChangeIndex {
-		//加入新的rule index
-		indexKey := path.GenerateRuleIndexKey(domainProject, request.ServiceId, copyRuleRef.Attribute, copyRuleRef.Pattern)
-		opts = append(opts, client.OpPut(client.WithStrKey(indexKey), client.WithStrValue(copyRuleRef.RuleId)))
-
-		//删除旧的rule index
-		oldIndexKey := path.GenerateRuleIndexKey(domainProject, request.ServiceId, oldRuleAttr, oldRulePatten)
-		opts = append(opts, client.OpDel(client.WithStrKey(oldIndexKey)))
-	}
-	opts = append(opts, client.OpPut(client.WithStrKey(key), client.WithValue(data)))
-
-	resp, err := client.Instance().TxnWithCmp(ctx, opts,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, request.ServiceId))),
-			client.CmpNotEqual, 0)},
-		nil)
-	if err != nil {
-		log.Errorf(err, "update service rule[%s/%s] failed, operator: %s", request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
-	}
-	if !resp.Succeeded {
-		log.Errorf(err, "update service rule[%s/%s] failed, service does not exist, operator: %s",
-			request.ServiceId, request.RuleId, remoteIP)
-		return &pb.UpdateServiceRuleResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
-	log.Infof("update service rule[%s/%s] successfully, operator: %s", request.ServiceId, request.RuleId, remoteIP)
-	return &pb.UpdateServiceRuleResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Get service rules successfully."),
-	}, nil
-}
-
-func (ds *MetadataManager) DeleteRule(ctx context.Context, request *pb.DeleteServiceRulesRequest) (
-	*pb.DeleteServiceRulesResponse, error) {
-	remoteIP := util.GetIPFromContext(ctx)
-	domainProject := util.ParseDomainProject(ctx)
-
-	// service id存在性校验
-	if !serviceUtil.ServiceExist(ctx, domainProject, request.ServiceId) {
-		log.Errorf(nil, "delete service[%s] rules %v failed, service does not exist, operator: %s",
-			request.ServiceId, request.RuleIds, remoteIP)
-		return &pb.DeleteServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
-	opts := []client.PluginOp{}
-	key := ""
-	indexKey := ""
-	for _, ruleID := range request.RuleIds {
-		key = path.GenerateServiceRuleKey(domainProject, request.ServiceId, ruleID)
-		log.Debugf("start delete service rule file: %s", key)
-		data, err := serviceUtil.GetOneRule(ctx, domainProject, request.ServiceId, ruleID)
-		if err != nil {
-			log.Errorf(err, "delete service[%s] rules %v failed, get rule[%s] failed, operator: %s",
-				request.ServiceId, request.RuleIds, ruleID, remoteIP)
-			return &pb.DeleteServiceRulesResponse{
-				Response: pb.CreateResponse(pb.ErrInternal, err.Error()),
-			}, err
-		}
-		if data == nil {
-			log.Errorf(nil, "delete service[%s] rules %v failed, rule[%s] does not exist, operator: %s",
-				request.ServiceId, request.RuleIds, ruleID, remoteIP)
-			return &pb.DeleteServiceRulesResponse{
-				Response: pb.CreateResponse(pb.ErrRuleNotExists, "This rule does not exist."),
-			}, nil
-		}
-		indexKey = path.GenerateRuleIndexKey(domainProject, request.ServiceId, data.Attribute, data.Pattern)
-		opts = append(opts,
-			client.OpDel(client.WithStrKey(key)),
-			client.OpDel(client.WithStrKey(indexKey)))
-	}
-	if len(opts) <= 0 {
-		log.Errorf(nil, "delete service[%s] rules %v failed, no rule has been deleted, operator: %s",
-			request.ServiceId, request.RuleIds, remoteIP)
-		return &pb.DeleteServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrRuleNotExists, "No service rule has been deleted."),
-		}, nil
-	}
-
-	resp, err := client.BatchCommitWithCmp(ctx, opts,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, request.ServiceId))),
-			client.CmpNotEqual, 0)},
-		nil)
-	if err != nil {
-		log.Errorf(err, "delete service[%s] rules %v failed, operator: %s", request.ServiceId, request.RuleIds, remoteIP)
-		return &pb.DeleteServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()),
-		}, err
-	}
-	if !resp.Succeeded {
-		log.Errorf(err, "delete service[%s] rules %v failed, service does not exist, operator: %s",
-			request.ServiceId, request.RuleIds, remoteIP)
-		return &pb.DeleteServiceRulesResponse{
-			Response: pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."),
-		}, nil
-	}
-
-	log.Infof("delete service[%s] rules %v successfully, operator: %s", request.ServiceId, request.RuleIds, remoteIP)
-	return &pb.DeleteServiceRulesResponse{
-		Response: pb.CreateResponse(pb.ResponseSuccess, "Delete service rules successfully."),
-	}, nil
+	log.Info(fmt.Sprintf("delete service[%s]'s tags %v successfully, operator: %s", request.ServiceId, request.Keys, remoteIP))
+	return nil
 }
 
 func (ds *MetadataManager) modifySchemas(ctx context.Context, domainProject string, service *pb.MicroService,
-	schemas []*pb.Schema) *errsvc.Error {
+	schemas []*pb.Schema) error {
 	remoteIP := util.GetIPFromContext(ctx)
 	serviceID := service.ServiceId
 	schemasFromDatabase, err := getSchemasFromDatabase(ctx, domainProject, serviceID)
 	if err != nil {
-		log.Errorf(nil, "modify service[%s] schemas failed, get schemas failed, operator: %s",
-			serviceID, remoteIP)
+		log.Error(fmt.Sprintf("modify service[%s] schemas failed, get schemas failed, operator: %s",
+			serviceID, remoteIP), nil)
 		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 
-	needUpdateSchemas, needAddSchemas, needDeleteSchemas, nonExistSchemaIds :=
+	needUpdateSchemas, needAddSchemas, needDeleteSchemas, _ :=
 		datasource.SchemasAnalysis(schemas, schemasFromDatabase, service.Schemas)
 
-	pluginOps := make([]client.PluginOp, 0)
-	if !ds.isSchemaEditable(service) {
-		if len(service.Schemas) == 0 {
-			res := quota.NewApplyQuotaResource(quota.TypeSchema, domainProject, serviceID, int64(len(nonExistSchemaIds)))
-			errQuota := quota.Apply(ctx, res)
-			if errQuota != nil {
-				log.Errorf(errQuota, "modify service[%s] schemas failed, operator: %s", serviceID, remoteIP)
-				return errQuota
-			}
-
-			service.Schemas = nonExistSchemaIds
-			opt, err := serviceUtil.UpdateService(domainProject, serviceID, service)
-			if err != nil {
-				log.Errorf(err, "modify service[%s] schemas failed, update service.Schemas failed, operator: %s",
-					serviceID, remoteIP)
-				return pb.NewError(pb.ErrInternal, err.Error())
-			}
-			pluginOps = append(pluginOps, opt)
-		} else {
-			if len(nonExistSchemaIds) != 0 {
-				errInfo := fmt.Errorf("non-existent schemaIDs %v", nonExistSchemaIds)
-				log.Errorf(errInfo, "modify service[%s] schemas failed, operator: %s", serviceID, remoteIP)
-				return pb.NewError(pb.ErrUndefinedSchemaID, errInfo.Error())
-			}
-			for _, needUpdateSchema := range needUpdateSchemas {
-				exist, err := isExistSchemaSummary(ctx, domainProject, serviceID, needUpdateSchema.SchemaId)
-				if err != nil {
-					return pb.NewError(pb.ErrInternal, err.Error())
-				}
-				if !exist {
-					opts := schemaWithDatabaseOpera(client.OpPut, domainProject, serviceID, needUpdateSchema)
-					pluginOps = append(pluginOps, opts...)
-				} else {
-					log.Warnf("schema[%s/%s] and it's summary already exist, skip to update, operator: %s",
-						serviceID, needUpdateSchema.SchemaId, remoteIP)
-				}
-			}
+	pluginOps := make([]etcdadpt.OpOptions, 0)
+	quotaSize := len(needAddSchemas) - len(needDeleteSchemas)
+	if quotaSize > 0 {
+		errQuota := quotasvc.ApplySchema(ctx, serviceID, int64(quotaSize))
+		if errQuota != nil {
+			log.Error(fmt.Sprintf("modify service[%s] schemas failed, operator: %s", serviceID, remoteIP), errQuota)
+			return errQuota
 		}
-
-		for _, schema := range needAddSchemas {
-			log.Infof("add new schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP)
-			opts := schemaWithDatabaseOpera(client.OpPut, domainProject, service.ServiceId, schema)
-			pluginOps = append(pluginOps, opts...)
-		}
-	} else {
-		quotaSize := len(needAddSchemas) - len(needDeleteSchemas)
-		if quotaSize > 0 {
-			res := quota.NewApplyQuotaResource(quota.TypeSchema, domainProject, serviceID, int64(quotaSize))
-			err := quota.Apply(ctx, res)
-			if err != nil {
-				log.Errorf(err, "modify service[%s] schemas failed, operator: %s", serviceID, remoteIP)
-				return err
-			}
-		}
-
-		var schemaIDs []string
-		for _, schema := range needAddSchemas {
-			log.Infof("add new schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP)
-			opts := schemaWithDatabaseOpera(client.OpPut, domainProject, service.ServiceId, schema)
-			pluginOps = append(pluginOps, opts...)
-			schemaIDs = append(schemaIDs, schema.SchemaId)
-		}
-
-		for _, schema := range needUpdateSchemas {
-			log.Infof("update schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP)
-			opts := schemaWithDatabaseOpera(client.OpPut, domainProject, serviceID, schema)
-			pluginOps = append(pluginOps, opts...)
-			schemaIDs = append(schemaIDs, schema.SchemaId)
-		}
-
-		for _, schema := range needDeleteSchemas {
-			log.Infof("delete non-existent schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP)
-			opts := schemaWithDatabaseOpera(client.OpDel, domainProject, serviceID, schema)
-			pluginOps = append(pluginOps, opts...)
-		}
-
-		service.Schemas = schemaIDs
-		opt, err := serviceUtil.UpdateService(domainProject, serviceID, service)
-		if err != nil {
-			log.Errorf(err, "modify service[%s] schemas failed, update service.Schemas failed, operator: %s",
-				serviceID, remoteIP)
-			return pb.NewError(pb.ErrInternal, err.Error())
-		}
-		pluginOps = append(pluginOps, opt)
 	}
 
+	var schemaIDs []string
+	for _, schema := range needAddSchemas {
+		log.Info(fmt.Sprintf("add new schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP))
+		opts, _ := putSchema(ctx, domainProject, service.ServiceId, schema)
+		pluginOps = append(pluginOps, opts...)
+		schemaIDs = append(schemaIDs, schema.SchemaId)
+	}
+
+	for _, schema := range needUpdateSchemas {
+		log.Info(fmt.Sprintf("update schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP))
+		opts, _ := putSchema(ctx, domainProject, serviceID, schema)
+		pluginOps = append(pluginOps, opts...)
+		schemaIDs = append(schemaIDs, schema.SchemaId)
+	}
+
+	for _, schema := range needDeleteSchemas {
+		log.Info(fmt.Sprintf("delete non-existent schema[%s/%s], operator: %s", serviceID, schema.SchemaId, remoteIP))
+		opts, _ := deleteSchema(ctx, domainProject, serviceID, schema)
+		pluginOps = append(pluginOps, opts...)
+	}
+
+	service.Schemas = schemaIDs
+	opts, err := eutil.UpdateService(ctx, domainProject, serviceID, service)
+	if err != nil {
+		log.Error(fmt.Sprintf("modify service[%s] schemas failed, update service.Schemas failed, operator: %s",
+			serviceID, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
+	}
+	pluginOps = append(pluginOps, opts...)
+
 	if len(pluginOps) != 0 {
-		resp, err := client.BatchCommitWithCmp(ctx, pluginOps,
-			[]client.CompareOp{client.OpCmp(
-				client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, serviceID))),
-				client.CmpNotEqual, 0)},
+		resp, err := etcdadpt.TxnWithCmp(ctx, pluginOps,
+			etcdadpt.If(etcdadpt.NotEqualVer(path.GenerateServiceKey(domainProject, serviceID), 0)),
 			nil)
 		if err != nil {
 			return pb.NewError(pb.ErrUnavailableBackend, err.Error())
@@ -2283,16 +1378,12 @@ func (ds *MetadataManager) modifySchemas(ctx context.Context, domainProject stri
 	return nil
 }
 
-func (ds *MetadataManager) isSchemaEditable(service *pb.MicroService) bool {
-	return (len(service.Environment) != 0 && service.Environment != pb.ENV_PROD) || ds.SchemaEditable
-}
-
 func (ds *MetadataManager) modifySchema(ctx context.Context, serviceID string, schema *pb.Schema) *errsvc.Error {
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 	schemaID := schema.SchemaId
 
-	microService, err := serviceUtil.GetService(ctx, domainProject, serviceID)
+	microService, err := eutil.GetService(ctx, domainProject, serviceID)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("microService does not exist, modify schema[%s/%s] failed, operator: %s",
@@ -2304,73 +1395,27 @@ func (ds *MetadataManager) modifySchema(ctx context.Context, serviceID string, s
 		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 
-	var pluginOps []client.PluginOp
+	var pluginOps []etcdadpt.OpOptions
 	isExist := isExistSchemaID(microService, []*pb.Schema{schema})
-
-	if !ds.isSchemaEditable(microService) {
-		if len(microService.Schemas) != 0 && !isExist {
-			return pb.NewError(pb.ErrUndefinedSchemaID, "Non-existent schemaID can't be added request "+pb.ENV_PROD)
-		}
-
-		key := path.GenerateServiceSchemaKey(domainProject, serviceID, schemaID)
-		respSchema, err := kv.Store().Schema().Search(ctx, client.WithStrKey(key), client.WithCountOnly())
+	if !isExist {
+		microService.Schemas = append(microService.Schemas, schemaID)
+		opts, err := eutil.UpdateService(ctx, domainProject, serviceID, microService)
 		if err != nil {
-			log.Errorf(err, "modify schema[%s/%s] failed, get schema summary failed, operator: %s",
-				serviceID, schemaID, remoteIP)
-			return pb.NewError(pb.ErrUnavailableBackend, err.Error())
+			log.Error(fmt.Sprintf("modify schema[%s/%s] failed, update microService.Schemas failed, operator: %s",
+				serviceID, schemaID, remoteIP), err)
+			return pb.NewError(pb.ErrInternal, err.Error())
 		}
-
-		if respSchema.Count != 0 {
-			if len(schema.Summary) == 0 {
-				log.Errorf(err, "%s mode, schema[%s/%s] already exists, can not be changed, operator: %s",
-					pb.ENV_PROD, serviceID, schemaID, remoteIP)
-				return pb.NewError(pb.ErrModifySchemaNotAllow,
-					"schema already exist, can not be changed request "+pb.ENV_PROD)
-			}
-
-			exist, err := isExistSchemaSummary(ctx, domainProject, serviceID, schemaID)
-			if err != nil {
-				log.Errorf(err, "check schema[%s/%s] summary existence failed, operator: %s",
-					serviceID, schemaID, remoteIP)
-				return pb.NewError(pb.ErrInternal, err.Error())
-			}
-			if exist {
-				log.Errorf(err, "%s mode, schema[%s/%s] already exist, can not be changed, operator: %s",
-					pb.ENV_PROD, serviceID, schemaID, remoteIP)
-				return pb.NewError(pb.ErrModifySchemaNotAllow, "schema already exist, can not be changed request "+pb.ENV_PROD)
-			}
-		}
-
-		if len(microService.Schemas) == 0 {
-			microService.Schemas = append(microService.Schemas, schemaID)
-			opt, err := serviceUtil.UpdateService(domainProject, serviceID, microService)
-			if err != nil {
-				log.Errorf(err, "modify schema[%s/%s] failed, update microService.Schemas failed, operator: %s",
-					serviceID, schemaID, remoteIP)
-				return pb.NewError(pb.ErrInternal, err.Error())
-			}
-			pluginOps = append(pluginOps, opt)
-		}
-	} else {
-		if !isExist {
-			microService.Schemas = append(microService.Schemas, schemaID)
-			opt, err := serviceUtil.UpdateService(domainProject, serviceID, microService)
-			if err != nil {
-				log.Errorf(err, "modify schema[%s/%s] failed, update microService.Schemas failed, operator: %s",
-					serviceID, schemaID, remoteIP)
-				return pb.NewError(pb.ErrInternal, err.Error())
-			}
-			pluginOps = append(pluginOps, opt)
-		}
+		pluginOps = append(pluginOps, opts...)
 	}
 
-	opts := commitSchemaInfo(domainProject, serviceID, schema)
+	opts, err := commitSchemaInfo(ctx, domainProject, serviceID, schema)
+	if err != nil {
+		return pb.NewError(pb.ErrInternal, err.Error())
+	}
 	pluginOps = append(pluginOps, opts...)
 
-	resp, err := client.Instance().TxnWithCmp(ctx, pluginOps,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(path.GenerateServiceKey(domainProject, serviceID))),
-			client.CmpNotEqual, 0)},
+	resp, err := etcdadpt.TxnWithCmp(ctx, pluginOps,
+		etcdadpt.If(etcdadpt.NotEqualVer(path.GenerateServiceKey(domainProject, serviceID), 0)),
 		nil)
 	if err != nil {
 		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
@@ -2381,7 +1426,9 @@ func (ds *MetadataManager) modifySchema(ctx context.Context, serviceID string, s
 	return nil
 }
 
-func (ds *MetadataManager) DeleteServicePri(ctx context.Context, serviceID string, force bool) (*pb.Response, error) {
+func (ds *MetadataManager) UnregisterService(ctx context.Context, request *pb.DeleteServiceRequest) error {
+	serviceID := request.ServiceId
+	force := request.Force
 	remoteIP := util.GetIPFromContext(ctx)
 	domainProject := util.ParseDomainProject(ctx)
 
@@ -2393,51 +1440,50 @@ func (ds *MetadataManager) DeleteServicePri(ctx context.Context, serviceID strin
 	if serviceID == core.Service.ServiceId {
 		err := errors.New("not allow to delete service center")
 		log.Error(fmt.Sprintf("%s micro-service[%s] failed, operator: %s", title, serviceID, remoteIP), err)
-		return pb.CreateResponse(pb.ErrInvalidParams, err.Error()), nil
+		return pb.NewError(pb.ErrInvalidParams, err.Error())
 	}
 
-	microservice, err := serviceUtil.GetService(ctx, domainProject, serviceID)
+	microservice, err := eutil.GetService(ctx, domainProject, serviceID)
 	if err != nil {
 		if errors.Is(err, datasource.ErrNoData) {
 			log.Debug(fmt.Sprintf("service does not exist, %s micro-service[%s] failed, operator: %s",
 				title, serviceID, remoteIP))
-			return pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."), nil
+			return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 		}
 		log.Error(fmt.Sprintf("%s micro-service[%s] failed, get service file failed, operator: %s",
 			title, serviceID, remoteIP), err)
-		return pb.CreateResponse(pb.ErrInternal, err.Error()), err
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 
 	// 强制删除，则与该服务相关的信息删除，非强制删除： 如果作为该被依赖（作为provider，提供服务,且不是只存在自依赖）或者存在实例，则不能删除
 	if !force {
-		dr := serviceUtil.NewProviderDependencyRelation(ctx, domainProject, microservice)
-		services, err := dr.GetDependencyConsumerIds()
+		services, err := eutil.GetConsumerIds(ctx, domainProject, microservice)
 		if err != nil {
-			log.Errorf(err, "delete micro-service[%s] failed, get service dependency failed, operator: %s",
-				serviceID, remoteIP)
-			return pb.CreateResponse(pb.ErrInternal, err.Error()), err
+			log.Error(fmt.Sprintf("delete micro-service[%s] failed, get service dependency failed, operator: %s",
+				serviceID, remoteIP), err)
+			return pb.NewError(pb.ErrInternal, err.Error())
 		}
 		if l := len(services); l > 1 || (l == 1 && services[0] != serviceID) {
-			log.Errorf(nil, "delete micro-service[%s] failed, other services[%d] depend on it, operator: %s",
-				serviceID, l, remoteIP)
-			return pb.CreateResponse(pb.ErrDependedOnConsumer, "Can not delete this service, other service rely it."), err
+			log.Error(fmt.Sprintf("delete micro-service[%s] failed, other services[%d] depend on it, operator: %s",
+				serviceID, l, remoteIP), nil)
+			return pb.NewError(pb.ErrDependedOnConsumer, "Can not delete this service, other service rely it.")
 		}
 
 		instancesKey := path.GenerateInstanceKey(domainProject, serviceID, "")
-		rsp, err := kv.Store().Instance().Search(ctx,
-			client.WithStrKey(instancesKey),
-			client.WithPrefix(),
-			client.WithCountOnly())
+		rsp, err := sd.Instance().Search(ctx,
+			etcdadpt.WithStrKey(instancesKey),
+			etcdadpt.WithPrefix(),
+			etcdadpt.WithCountOnly())
 		if err != nil {
-			log.Errorf(err, "delete micro-service[%s] failed, get instances failed, operator: %s",
-				serviceID, remoteIP)
-			return pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()), err
+			log.Error(fmt.Sprintf("delete micro-service[%s] failed, get instances failed, operator: %s",
+				serviceID, remoteIP), err)
+			return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 		}
 
 		if rsp.Count > 0 {
-			log.Errorf(nil, "delete micro-service[%s] failed, service deployed instances[%s], operator: %s",
-				serviceID, rsp.Count, remoteIP)
-			return pb.CreateResponse(pb.ErrDeployedInstance, "Can not delete the service deployed instance(s)."), err
+			log.Error(fmt.Sprintf("delete micro-service[%s] failed, service deployed instances[%d], operator: %s",
+				serviceID, rsp.Count, remoteIP), nil)
+			return pb.NewError(pb.ErrDeployedInstance, "Can not delete the service deployed instance(s).")
 		}
 	}
 
@@ -2450,92 +1496,129 @@ func (ds *MetadataManager) DeleteServicePri(ctx context.Context, serviceID strin
 		Version:     microservice.Version,
 		Alias:       microservice.Alias,
 	}
-	opts := []client.PluginOp{
-		client.OpDel(client.WithStrKey(path.GenerateServiceIndexKey(serviceKey))),
-		client.OpDel(client.WithStrKey(path.GenerateServiceAliasKey(serviceKey))),
-		client.OpDel(client.WithStrKey(serviceIDKey)),
+	opts := []etcdadpt.OpOptions{
+		etcdadpt.OpDel(etcdadpt.WithStrKey(path.GenerateServiceIndexKey(serviceKey))),
+		etcdadpt.OpDel(etcdadpt.WithStrKey(path.GenerateServiceAliasKey(serviceKey))),
+		etcdadpt.OpDel(etcdadpt.WithStrKey(serviceIDKey)),
 	}
 
-	//删除依赖规则
-	optDeleteDep, err := serviceUtil.DeleteDependencyForDeleteService(domainProject, serviceID, serviceKey)
+	syncOpts, err := esync.GenDeleteOpts(ctx, datasource.ResourceService, serviceID,
+		&pb.DeleteServiceRequest{ServiceId: serviceID, Force: force})
 	if err != nil {
-		log.Errorf(err, "%s micro-service[%s] failed, delete dependency failed, operator: %s",
-			title, serviceID, remoteIP)
-		return pb.CreateResponse(pb.ErrInternal, err.Error()), err
+		log.Error("fail to sync opt", err)
+		return pb.NewError(pb.ErrInternal, err.Error())
+	}
+	opts = append(opts, syncOpts...)
+
+	//删除依赖规则
+	optDeleteDep, err := eutil.DeleteDependencyForDeleteService(domainProject, serviceID, serviceKey)
+	if err != nil {
+		log.Error(fmt.Sprintf("%s micro-service[%s] failed, delete dependency failed, operator: %s",
+			title, serviceID, remoteIP), err)
+		return pb.NewError(pb.ErrInternal, err.Error())
 	}
 	opts = append(opts, optDeleteDep)
 
-	//删除黑白名单
-	opts = append(opts, client.OpDel(
-		client.WithStrKey(path.GenerateServiceRuleKey(domainProject, serviceID, "")),
-		client.WithPrefix()))
-	opts = append(opts, client.OpDel(client.WithStrKey(
-		util.StringJoin([]string{path.GetServiceRuleIndexRootKey(domainProject), serviceID, ""}, "/")),
-		client.WithPrefix()))
-
 	//删除schemas
-	opts = append(opts, client.OpDel(
-		client.WithStrKey(path.GenerateServiceSchemaKey(domainProject, serviceID, "")),
-		client.WithPrefix()))
-	opts = append(opts, client.OpDel(
-		client.WithStrKey(path.GenerateServiceSchemaSummaryKey(domainProject, serviceID, "")),
-		client.WithPrefix()))
+	opts = append(opts, etcdadpt.OpDel(
+		etcdadpt.WithStrKey(path.GenerateServiceSchemaKey(domainProject, serviceID, "")),
+		etcdadpt.WithPrefix()))
+	opts = append(opts, etcdadpt.OpDel(
+		etcdadpt.WithStrKey(path.GenerateServiceSchemaSummaryKey(domainProject, serviceID, "")),
+		etcdadpt.WithPrefix()))
+	opts = append(opts, etcdadpt.OpDel(
+		etcdadpt.WithStrKey(path.GenerateServiceSchemaRefKey(domainProject, serviceID, "")),
+		etcdadpt.WithPrefix()))
 
 	//删除tags
-	opts = append(opts, client.OpDel(
-		client.WithStrKey(path.GenerateServiceTagKey(domainProject, serviceID))))
+	opts = append(opts, etcdadpt.OpDel(
+		etcdadpt.WithStrKey(path.GenerateServiceTagKey(domainProject, serviceID))))
 
 	//删除instances
-	opts = append(opts, client.OpDel(
-		client.WithStrKey(path.GenerateInstanceKey(domainProject, serviceID, "")),
-		client.WithPrefix()))
-	opts = append(opts, client.OpDel(
-		client.WithStrKey(path.GenerateInstanceLeaseKey(domainProject, serviceID, "")),
-		client.WithPrefix()))
+	opts = append(opts, etcdadpt.OpDel(
+		etcdadpt.WithStrKey(path.GenerateInstanceKey(domainProject, serviceID, "")),
+		etcdadpt.WithPrefix()))
+	opts = append(opts, etcdadpt.OpDel(
+		etcdadpt.WithStrKey(path.GenerateInstanceLeaseKey(domainProject, serviceID, "")),
+		etcdadpt.WithPrefix()))
 
 	//删除实例
-	err = serviceUtil.DeleteServiceAllInstances(ctx, serviceID)
+	err = eutil.DeleteServiceAllInstances(ctx, serviceID)
 	if err != nil {
-		log.Errorf(err, "%s micro-service[%s] failed, revoke all instances failed, operator: %s",
-			title, serviceID, remoteIP)
-		return pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()), err
+		log.Error(fmt.Sprintf("%s micro-service[%s] failed, revoke all instances failed, operator: %s",
+			title, serviceID, remoteIP), err)
+		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 
-	resp, err := client.Instance().TxnWithCmp(ctx, opts,
-		[]client.CompareOp{client.OpCmp(
-			client.CmpVer(util.StringToBytesWithNoCopy(serviceIDKey)),
-			client.CmpNotEqual, 0)},
-		nil)
+	resp, err := etcdadpt.TxnWithCmp(ctx, opts, etcdadpt.If(etcdadpt.NotEqualVer(serviceIDKey, 0)), nil)
 	if err != nil {
-		log.Errorf(err, "%s micro-service[%s] failed, operator: %s", title, serviceID, remoteIP)
-		return pb.CreateResponse(pb.ErrUnavailableBackend, err.Error()), err
+		log.Error(fmt.Sprintf("%s micro-service[%s] failed, operator: %s", title, serviceID, remoteIP), err)
+		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
 	}
 	if !resp.Succeeded {
-		log.Errorf(err, "%s micro-service[%s] failed, service does not exist, operator: %s",
-			title, serviceID, remoteIP)
-		return pb.CreateResponse(pb.ErrServiceNotExists, "Service does not exist."), nil
+		log.Error(fmt.Sprintf("%s micro-service[%s] failed, service does not exist, operator: %s",
+			title, serviceID, remoteIP), err)
+		return pb.NewError(pb.ErrServiceNotExists, "Service does not exist.")
 	}
 
-	serviceUtil.RemandServiceQuota(ctx)
+	quotasvc.RemandService(ctx)
 
-	log.Infof("%s micro-service[%s] successfully, operator: %s", title, serviceID, remoteIP)
-	return pb.CreateResponse(pb.ResponseSuccess, "Unregister service successfully."), nil
+	log.Info(fmt.Sprintf("%s micro-service[%s] successfully, operator: %s", title, serviceID, remoteIP))
+	return nil
 }
 
-func (ds *MetadataManager) GetDeleteServiceFunc(ctx context.Context, serviceID string, force bool,
-	serviceRespChan chan<- *pb.DelServicesRspInfo) func(context.Context) {
-	return func(_ context.Context) {
-		serviceRst := &pb.DelServicesRspInfo{
-			ServiceId:  serviceID,
-			ErrMessage: "",
-		}
-		resp, err := ds.DeleteServicePri(ctx, serviceID, force)
-		if err != nil {
-			serviceRst.ErrMessage = err.Error()
-		} else if resp.GetCode() != pb.ResponseSuccess {
-			serviceRst.ErrMessage = resp.GetMessage()
-		}
+func (ds *MetadataManager) Statistics(ctx context.Context, withShared bool) (*pb.Statistics, error) {
+	return statistics(ctx, withShared)
+}
 
-		serviceRespChan <- serviceRst
+func (ds *MetadataManager) UpdateManyInstanceStatus(ctx context.Context, match *datasource.MatchPolicy, status string) error {
+	resp, _ := ds.ListManyInstances(ctx, &pb.GetAllInstancesRequest{})
+	instances := resp.Instances
+	if len(instances) == 0 {
+		return nil
 	}
+	options := make([]etcdadpt.OpOptions, 0)
+	cmps := make([]etcdadpt.CmpOptions, 0)
+
+	domainProject := util.ParseDomainProject(ctx)
+
+	for _, instance := range instances {
+		var t = true
+		for k, v := range match.Properties {
+			value, ok := instance.Properties[k]
+			if ok {
+				if value != v {
+					t = false
+					break
+				}
+			} else {
+				t = false
+				break
+			}
+		}
+		if t {
+			key := path.GenerateInstanceKey(domainProject, instance.ServiceId, instance.InstanceId)
+			//更新状态
+			instance.Status = status
+			data, _ := json.Marshal(instance)
+			leaseID, err := serviceUtil.GetLeaseID(ctx, domainProject, instance.ServiceId, instance.InstanceId)
+			if err != nil {
+				log.Error(fmt.Sprintf("get leaseId %s error", instance.InstanceId), err)
+				continue
+			}
+			options = append(options, etcdadpt.Ops(etcdadpt.OpPut(etcdadpt.WithStrKey(key), etcdadpt.WithValue(data), etcdadpt.WithLease(leaseID)))...)
+			cmps = append(cmps, etcdadpt.If(etcdadpt.NotEqualVer(path.GenerateServiceKey(domainProject, instance.ServiceId), 0))...)
+		}
+	}
+	_, err := etcdadpt.TxnWithCmp(ctx,
+		options,
+		cmps,
+		nil)
+
+	if err != nil {
+		log.Error("UpdateManyInstanceStatus error", err)
+
+		return pb.NewError(pb.ErrUnavailableBackend, err.Error())
+	}
+	return nil
 }

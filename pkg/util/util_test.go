@@ -19,7 +19,6 @@ package util
 import (
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -48,40 +47,6 @@ func TestInt16ToInt64(t *testing.T) {
 	if i != 1<<16 {
 		t.Fatalf("Int16ToInt64 failed, %v %d != %d", bs, i, 1<<16)
 	}
-}
-
-func TestFileLastName(t *testing.T) {
-	n := FileLastName("")
-	if n != "" {
-		t.Fatal("TestFileLastName '' failed", n)
-	}
-	n = FileLastName("a")
-	if n != "a" {
-		t.Fatal("TestFileLastName 'a' failed", n)
-	}
-	n = FileLastName("a/b")
-	if n != "a/b" {
-		t.Fatal("TestFileLastName 'a/b' failed", n)
-	}
-	n = FileLastName("a/b/c")
-	if n != "b/c" {
-		t.Fatal("TestFileLastName 'b/c' failed", n)
-	}
-	n = FileLastName("b/")
-	if n != "b/" {
-		t.Fatal("TestFileLastName 'b' failed", n)
-	}
-	n = FileLastName("/")
-	if n != "/" {
-		t.Fatal("TestFileLastName 'b' failed", n)
-	}
-}
-
-func TestResetTimer(t *testing.T) {
-	timer := time.NewTimer(time.Microsecond)
-	ResetTimer(timer, time.Microsecond)
-	ResetTimer(timer, time.Second)
-	<-timer.C
 }
 
 func TestStringJoin(t *testing.T) {
@@ -189,4 +154,33 @@ func TestIsVersionOrHealthPattern(t *testing.T) {
 	assert.True(t, IsVersionOrHealthPattern("/health"))
 	assert.True(t, IsVersionOrHealthPattern("/v4/a/registry/health"))
 	assert.False(t, IsVersionOrHealthPattern("/health/a"))
+}
+
+func TestToSnake(t *testing.T) {
+	type args struct {
+		name string
+	}
+	tests := []struct {
+		name string
+		args args
+		want string
+	}{
+		{"single word", args{"a"}, "a"},
+		{"2 words", args{"a-b"}, "aB"},
+		{"3 words", args{"a-b-cc"}, "aBCc"},
+		{"invalid", args{"a.b"}, "a.b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ToSnake(tt.args.name); got != tt.want {
+				t.Errorf("ToSnake() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGeneratePassword(t *testing.T) {
+	password, err := GeneratePassword()
+	assert.NoError(t, err)
+	assert.Equal(t, 8, len(password), password)
 }

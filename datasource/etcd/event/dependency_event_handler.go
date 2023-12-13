@@ -23,22 +23,25 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/go-chassis/cari/discovery"
-
 	"github.com/apache/servicecomb-service-center/datasource"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/client"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/kv"
-	"github.com/apache/servicecomb-service-center/datasource/etcd/mux"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/path"
 	"github.com/apache/servicecomb-service-center/datasource/etcd/sd"
+	"github.com/apache/servicecomb-service-center/datasource/etcd/state/kvstore"
 	serviceUtil "github.com/apache/servicecomb-service-center/datasource/etcd/util"
-	"github.com/apache/servicecomb-service-center/pkg/backoff"
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/queue"
 	"github.com/apache/servicecomb-service-center/pkg/util"
 	"github.com/apache/servicecomb-service-center/server/config"
+	pb "github.com/go-chassis/cari/discovery"
+	"github.com/go-chassis/cari/dlock"
+	"github.com/go-chassis/foundation/backoff"
+	"github.com/go-chassis/foundation/gopool"
+	"github.com/go-chassis/foundation/stringutil"
+	"github.com/go-chassis/foundation/timeutil"
+	"github.com/little-cui/etcdadpt"
 )
+
+const depQueueLockKey = "/dep-queue"
 
 // just for unit test
 var testMux sync.Mutex
@@ -49,11 +52,11 @@ type DependencyEventHandler struct {
 	signals *queue.UniQueue
 }
 
-func (h *DependencyEventHandler) Type() sd.Type {
-	return kv.DependencyQueue
+func (h *DependencyEventHandler) Type() kvstore.Type {
+	return sd.TypeDependencyQueue
 }
 
-func (h *DependencyEventHandler) OnEvent(evt sd.KvEvent) {
+func (h *DependencyEventHandler) OnEvent(evt kvstore.Event) {
 	action := evt.Type
 	if action != pb.EVT_CREATE && action != pb.EVT_UPDATE && action != pb.EVT_INIT {
 		return
@@ -78,24 +81,20 @@ func (h *DependencyEventHandler) backoff(f func(), retries int) int {
 
 func (h *DependencyEventHandler) tryWithBackoff(success func() error, backoff func(), retries int) (int, error) {
 	defer log.Recover()
-	lock, err := mux.Try(mux.DepQueueLock)
-	if err != nil {
-		log.Errorf(err, "try to lock %s failed", mux.DepQueueLock)
-		return h.backoff(backoff, retries), err
-	}
 
-	if lock == nil {
+	if err := dlock.TryLock(depQueueLockKey, -1); err != nil {
+		log.Error(fmt.Sprintf("try to lock %s failed", depQueueLockKey), err)
 		return 0, nil
 	}
-
 	defer func() {
-		if err := lock.Unlock(); err != nil {
-			log.Error("", err)
+		if err := dlock.Unlock(depQueueLockKey); err != nil {
+			log.Error("unlock failed", err)
 		}
 	}()
-	err = success()
+
+	err := success()
 	if err != nil {
-		log.Errorf(err, "handle dependency event failed")
+		log.Error("handle dependency event failed", err)
 		return h.backoff(backoff, retries), err
 	}
 
@@ -117,7 +116,7 @@ func (h *DependencyEventHandler) eventLoop() {
 				if err != nil {
 					log.Error("", err)
 				}
-				util.ResetTimer(timer, period)
+				timeutil.ResetTimer(timer, period)
 			case <-timer.C:
 				h.notify()
 				timer.Reset(period)
@@ -128,11 +127,11 @@ func (h *DependencyEventHandler) eventLoop() {
 
 type DependencyEventHandlerResource struct {
 	dep           *pb.ConsumerDependency
-	kv            *sd.KeyValue
+	kv            *kvstore.KeyValue
 	domainProject string
 }
 
-func NewDependencyEventHandlerResource(dep *pb.ConsumerDependency, kv *sd.KeyValue, domainProject string) *DependencyEventHandlerResource {
+func NewDependencyEventHandlerResource(dep *pb.ConsumerDependency, kv *kvstore.KeyValue, domainProject string) *DependencyEventHandlerResource {
 	return &DependencyEventHandlerResource{
 		dep,
 		kv,
@@ -145,8 +144,8 @@ func (h *DependencyEventHandler) Handle() error {
 	defer testMux.Unlock()
 
 	key := path.GetServiceDependencyQueueRootKey("")
-	resp, err := kv.Store().DependencyQueue().Search(context.Background(), client.WithNoCache(),
-		client.WithStrKey(key), client.WithPrefix(), client.WithAscendOrder(), client.WithOrderByCreate())
+	resp, err := sd.DependencyQueue().Search(context.Background(), etcdadpt.WithNoCache(),
+		etcdadpt.WithStrKey(key), etcdadpt.WithPrefix())
 	if err != nil {
 		return err
 	}
@@ -190,8 +189,10 @@ func (h *DependencyEventHandler) dependencyRuleHandle(res interface{}) error {
 	consumerInfo := pb.DependenciesToKeys([]*pb.MicroServiceKey{r.Consumer}, domainProject)[0]
 	providersInfo := pb.DependenciesToKeys(r.Providers, domainProject)
 
-	var dep serviceUtil.Dependency
-	var err error
+	var (
+		dep serviceUtil.Dependency
+		err error
+	)
 	dep.DomainProject = domainProject
 	dep.Consumer = consumerInfo
 	dep.ProvidersRule = providersInfo
@@ -200,30 +201,29 @@ func (h *DependencyEventHandler) dependencyRuleHandle(res interface{}) error {
 	} else {
 		err = serviceUtil.AddDependencyRule(ctx, &dep)
 	}
-
 	if err != nil {
-		log.Errorf(err, "modify dependency rule failed, override: %t, consumer %s", r.Override, consumerFlag)
+		log.Error(fmt.Sprintf("modify dependency rule failed, override: %t, consumer %s", r.Override, consumerFlag), err)
 		return fmt.Errorf("override: %t, consumer is %s, %s", r.Override, consumerFlag, err.Error())
 	}
 
 	if err = h.removeKV(ctx, dependencyEventHandlerRes.kv); err != nil {
-		log.Errorf(err, "remove dependency rule failed, override: %t, consumer %s", r.Override, consumerFlag)
+		log.Error(fmt.Sprintf("remove dependency rule failed, override: %t, consumer %s", r.Override, consumerFlag), err)
 		return err
 	}
 
-	log.Infof("maintain dependency [%v] successfully", r)
+	log.Info(fmt.Sprintf("maintain dependency [%v] successfully", r))
 	return nil
 }
 
-func (h *DependencyEventHandler) removeKV(ctx context.Context, kv *sd.KeyValue) error {
-	dResp, err := client.Instance().TxnWithCmp(ctx, []client.PluginOp{client.OpDel(client.WithKey(kv.Key))},
-		[]client.CompareOp{client.OpCmp(client.CmpVer(kv.Key), client.CmpEqual, kv.Version)},
+func (h *DependencyEventHandler) removeKV(ctx context.Context, kv *kvstore.KeyValue) error {
+	dResp, err := etcdadpt.TxnWithCmp(ctx, etcdadpt.Ops(etcdadpt.OpDel(etcdadpt.WithKey(kv.Key))),
+		etcdadpt.If(etcdadpt.EqualVer(stringutil.Bytes2str(kv.Key), kv.Version)),
 		nil)
 	if err != nil {
 		return fmt.Errorf("can not remove the dependency %s request, %s", util.BytesToStringWithNoCopy(kv.Key), err.Error())
 	}
 	if !dResp.Succeeded {
-		log.Infof("the dependency %s request is changed", util.BytesToStringWithNoCopy(kv.Key))
+		log.Info(fmt.Sprintf("the dependency %s request is changed", util.BytesToStringWithNoCopy(kv.Key)))
 	}
 	return nil
 }
@@ -232,7 +232,7 @@ func (h *DependencyEventHandler) CleanUp(domainProjects map[string]struct{}) {
 	for domainProject := range domainProjects {
 		ctx := util.WithGlobal(context.Background())
 		if err := serviceUtil.CleanUpDependencyRules(ctx, domainProject); err != nil {
-			log.Errorf(err, "clean up '%s' dependency rules failed", domainProject)
+			log.Error(fmt.Sprintf("clean up '%s' dependency rules failed", domainProject), err)
 		}
 	}
 }

@@ -19,29 +19,22 @@ package etcd_test
 // initialize
 import (
 	"context"
+	"testing"
 
 	_ "github.com/apache/servicecomb-service-center/test"
-
-	"github.com/apache/servicecomb-service-center/datasource"
 	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/reporters"
-
-	"testing"
-	"time"
-
 	. "github.com/onsi/gomega"
+
+	"github.com/apache/servicecomb-service-center/pkg/util"
+	"github.com/onsi/ginkgo/reporters"
 )
-
-var timeLimit = 2 * time.Second
-
-var _ = BeforeSuite(func() {
-	//clear service created in last test
-	time.Sleep(timeLimit)
-	_ = datasource.GetSCManager().ClearNoInstanceServices(context.Background(), timeLimit)
-})
 
 func TestEtcd(t *testing.T) {
 	RegisterFailHandler(Fail)
 	junitReporter := reporters.NewJUnitReporter("etcd.junit.xml")
 	RunSpecsWithDefaultAndCustomReporters(t, "etcd Suite", []Reporter{junitReporter})
+}
+
+func getContext() context.Context {
+	return util.WithNoCache(util.SetDomainProject(context.Background(), "default", "default"))
 }

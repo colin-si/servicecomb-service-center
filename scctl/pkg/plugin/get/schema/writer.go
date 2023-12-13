@@ -1,17 +1,19 @@
-// Licensed to the Apache Software Foundation (ASF) under one or more
-// contributor license agreements.  See the NOTICE file distributed with
-// this work for additional information regarding copyright ownership.
-// The ASF licenses this file to You under the Apache License, Version 2.0
-// (the "License"); you may not use this file except in compliance with
-// the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package schema
 
@@ -26,23 +28,23 @@ type Config struct {
 	SaveDir string
 }
 
-type SchemaWriter interface {
+type Writer interface {
 	Write([]*pb.Schema) error
 }
 
-func NewSchemaWriter(cfg Config) SchemaWriter {
+func NewSchemaWriter(cfg Config) Writer {
 	switch {
 	case len(cfg.SaveDir) == 0:
-		return &SchemaStdoutWriter{}
+		return &StdoutWriter{}
 	default:
-		return &SchemaFileWriter{cfg.SaveDir}
+		return &FileWriter{cfg.SaveDir}
 	}
 }
 
-type SchemaStdoutWriter struct {
+type StdoutWriter struct {
 }
 
-func (w *SchemaStdoutWriter) Write(schemas []*pb.Schema) error {
+func (w *StdoutWriter) Write(schemas []*pb.Schema) error {
 	for _, schema := range schemas {
 		_, err := os.Stdout.WriteString(schema.Schema)
 		if err != nil {
@@ -52,11 +54,11 @@ func (w *SchemaStdoutWriter) Write(schemas []*pb.Schema) error {
 	return nil
 }
 
-type SchemaFileWriter struct {
+type FileWriter struct {
 	Dir string
 }
 
-func (w *SchemaFileWriter) Write(schemas []*pb.Schema) error {
+func (w *FileWriter) Write(schemas []*pb.Schema) error {
 	err := os.MkdirAll(w.Dir, 0750)
 	if err != nil {
 		return err

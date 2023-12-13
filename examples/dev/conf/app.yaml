@@ -36,10 +36,9 @@ server:
     ipLookups: RemoteAddr,X-Forwarded-For,X-Real-IP
 
 gov:
-  plugins:
-    - name: kie
-      type: kie
-      endpoint: http://127.0.0.1:30110
+  kie:
+    type: kie
+    endpoint: http://127.0.0.1:30110
 
 log:
   # DEBUG, INFO, WARN, ERROR, FATAL
@@ -128,12 +127,6 @@ registry:
       keyFile: /opt/ssl/client.key
 
   service:
-    # enable the job clear the microservices which deploy no instance
-    clearEnable: false
-    # the interval of job
-    clearInterval: 12h
-    # the duration between current datetime and microservice created datetime
-    clearTTL: 24h
     globalVisible:
   instance:
     ttl:
@@ -141,8 +134,6 @@ registry:
   schema:
     # if want disable Test Schema, SchemaDisable set true
     disable: false
-    # if want disable modification of Schema in production environment, SchemaEditable set false
-    editable: false
   # enable to register sc itself when startup
   selfRegister: 1
 

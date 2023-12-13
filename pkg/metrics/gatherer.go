@@ -23,10 +23,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/servicecomb-service-center/pkg/gopool"
 	"github.com/apache/servicecomb-service-center/pkg/log"
 	"github.com/apache/servicecomb-service-center/pkg/prometheus"
+	mapset "github.com/deckarep/golang-set"
+	"github.com/go-chassis/foundation/gopool"
 )
+
+const prefixName = FamilyName + "_"
+
+var families = mapset.NewSet(FamilyName)
+
+// EmptyGather just active when metrics disabled
+var EmptyGather = &Gather{
+	Records: NewMetrics(),
+	closed:  false,
+}
 
 func NewGatherer(opts Options) *Gather {
 	return &Gather{
@@ -65,7 +76,7 @@ func (mm *Gather) loop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := mm.Collect(); err != nil {
-				log.Errorf(err, "metrics collect failed")
+				log.Error("metrics collect failed", err)
 				return
 			}
 
@@ -82,14 +93,42 @@ func (mm *Gather) Collect() error {
 
 	records := NewMetrics()
 	for _, mf := range mfs {
-		name := mf.GetName()
-		if _, ok := SysMetrics.Get(name); strings.Index(name, familyNamePrefix) == 0 || ok {
-			if d := Calculate(mf); d != nil {
-				records.put(strings.TrimPrefix(name, familyNamePrefix), d)
-			}
+		name := RecordName(mf.GetName())
+		if len(name) == 0 {
+			continue
+		}
+		if d := Calculate(mf); d != nil {
+			records.put(name, d)
 		}
 	}
 	// clean the old cache here
 	mm.Records = records
 	return nil
+}
+
+func RecordName(metricName string) string {
+	_, isSys := SysMetrics.Get(metricName)
+	family := ParseFamily(metricName)
+	if !isSys && len(family) == 0 {
+		return ""
+	}
+	if strings.Index(metricName, prefixName) == 0 {
+		// just compatible with sc old metric name without familyName
+		metricName = strings.TrimPrefix(metricName, prefixName)
+	}
+	return metricName
+}
+
+func CollectFamily(familyName string) {
+	families.Add(familyName)
+}
+
+func ParseFamily(metricName string) string {
+	for family := range families.Iter() {
+		s := family.(string)
+		if strings.Index(metricName, s+"_") == 0 {
+			return s
+		}
+	}
+	return ""
 }
